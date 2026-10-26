@@ -563,6 +563,16 @@ def get_yt_dlp_base_cmd(
             logger.info(f"Using YouTube cookies from: {eff}")
             cmd.extend(["--cookies", str(eff)])
 
+    # Route video downloads through the configured proxy too (PROXY_URL / WEBSHARE_*), not only
+    # transcript requests; cloud IPs are usually blocked by YouTube.
+    try:
+        from backend.utils.proxy import get_proxy_url
+        proxy = get_proxy_url()
+    except Exception:
+        proxy = None
+    if proxy:
+        cmd.extend(["--proxy", proxy])
+
     cmd.append("--force-ipv4")
     return cmd
 
