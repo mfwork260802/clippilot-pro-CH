@@ -694,7 +694,7 @@ export const ClipStudioModal: React.FC<ClipStudioModalProps> = ({
                       )}
                       {streamerPreset === 'split_top_cam' && (
                         <div className="wireframe-gameplay-badge">
-                          // GAMEPLAY ({aspectRatio})
+                          GAMEPLAY ({aspectRatio})
                         </div>
                       )}
                     </div>

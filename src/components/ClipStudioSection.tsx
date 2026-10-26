@@ -39,6 +39,7 @@ import type {
   HardwareAccelInfo,
   FontItem,
   TranscriptLine,
+  SmartEditingSettings,
 } from '../types';
 
 interface ClipStudioSectionProps {
@@ -238,6 +239,7 @@ export interface StudioPreferences {
   titleDuration?: TitleDurationOption;
   originalAudioVolume?: number;
   hardwareAccel?: HardwareAccelOption;
+  smartEditing?: Partial<SmartEditingSettings>;
   titleYPercent?: number;
   subtitleYPercent?: number;
   subtitleCenterYPercent?: number;
@@ -282,7 +284,23 @@ export const DEFAULT_STUDIO_PREFS: Required<StudioPreferences> = {
   fileNameSuffix: '',
   titlePrefix: '',
   titleSuffix: '',
+  smartEditing: {},
 };
+
+export const DEFAULT_SMART_EDITING: SmartEditingSettings = {
+  dynamicTracking: true,
+  bgmDucking: true,
+  removeSilence: false,
+  silenceMinDuration: 0.6,
+  teaserHook: false,
+  teaserDuration: 3,
+  autoZoom: false,
+  generateThumbnail: true,
+  captionTiming: 'auto',
+};
+
+// Insets of the TikTok / Reels / Shorts UI on a 1080x1920 frame (fractions of the frame)
+const SAFE_ZONE = { top: 0.142, bottom: 0.15, right: 0.144 };
 
 function getSavedStudioPreferences(): Partial<StudioPreferences> {
   try {
@@ -380,6 +398,12 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
   // Manual Up/Down positioning for All Formats
   const [titleYPercent, setTitleYPercent] = useState<number>(() => getSavedStudioPreferences().titleYPercent ?? DEFAULT_STUDIO_PREFS.titleYPercent);
   const [subtitleYPercent, setSubtitleYPercent] = useState<number>(() => getSavedStudioPreferences().subtitleYPercent ?? DEFAULT_STUDIO_PREFS.subtitleYPercent);
+  const [smartEditing, setSmartEditing] = useState<SmartEditingSettings>(() => ({
+    ...DEFAULT_SMART_EDITING,
+    ...(getSavedStudioPreferences().smartEditing || {}),
+  }));
+  const [showSafeZones, setShowSafeZones] = useState<boolean>(false);
+  const updateSmartEditing = (patch: Partial<SmartEditingSettings>) => setSmartEditing(prev => ({ ...prev, ...patch }));
   const [subtitlePositionMode, setSubtitlePositionMode] = useState<SubtitlePositionMode>(() => getSavedStudioPreferences().subtitlePositionMode ?? DEFAULT_STUDIO_PREFS.subtitlePositionMode);
   const [subtitleCenterYPercent, setSubtitleCenterYPercent] = useState<number>(() => getSavedStudioPreferences().subtitleCenterYPercent ?? DEFAULT_STUDIO_PREFS.subtitleCenterYPercent);
   const [isCustomTitleY, setIsCustomTitleY] = useState<boolean>(() => getSavedStudioPreferences().isCustomTitleY ?? DEFAULT_STUDIO_PREFS.isCustomTitleY);
@@ -1549,6 +1573,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
       fileNameSuffix,
       titlePrefix,
       titleSuffix,
+      smartEditing,
     };
     try {
       localStorage.setItem(STUDIO_PREFS_KEY, JSON.stringify(prefs));
@@ -1586,9 +1611,11 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
     fileNameSuffix,
     titlePrefix,
     titleSuffix,
+    smartEditing,
   ]);
 
   const handleResetToDefaults = () => {
+    setSmartEditing(DEFAULT_SMART_EDITING);
     setAspectRatio(DEFAULT_STUDIO_PREFS.aspectRatio);
     setBackgroundStyle(DEFAULT_STUDIO_PREFS.backgroundStyle);
     setEnableFaceTracking(DEFAULT_STUDIO_PREFS.enableFaceTracking);
@@ -1699,6 +1726,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
       // Multi-Segment Merged Highlight Video
       renderMode,
       compilationTitle: compilationTitle.trim() || undefined,
+      smartEditing,
     });
   };
 
@@ -2071,7 +2099,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                 <div className="hook-clip-title-input-wrap" style={{ marginBottom: '0.75rem', width: '100%' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
                     <label className="hook-input-label" style={{ margin: 0, fontWeight: 500, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                      // {t.studio.clipTitleEditLabel || "Hook Title (Active Clip):"}
+                      {t.studio.clipTitleEditLabel || "Hook Title (Active Clip):"}
                     </label>
                     {currentCustomTitle !== undefined && currentCustomTitle.trim() !== '' && currentCustomTitle !== (currentPreviewClip?.title_suggestion || currentPreviewClip?.title) && (
                       <button
@@ -2192,7 +2220,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                   <div className="font-section-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                       <span className="sub-toggle-label" style={{ margin: 0, fontWeight: 600, color: 'var(--text-secondary)' }}>
-                        // {t.studio.titleFontFamily || "Title Font Family"}
+                        {t.studio.titleFontFamily || "Title Font Family"}
                       </span>
                       <span className="badge" style={{ fontSize: '0.68rem', padding: '0.1rem 0.45rem', opacity: 0.85 }}>
                         {titleFont}
@@ -2377,7 +2405,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                 <div className="studio-sub-toggle" style={{ marginTop: '0.85rem', flexDirection: 'column', alignItems: 'stretch' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                     <span className="sub-toggle-label" style={{ margin: 0 }}>
-                      {t.studio.titleYLabel || "// Title Vertical Position:"}
+                      {t.studio.titleYLabel || "Title Vertical Position:"}
                     </span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       <span className="badge" style={{ fontSize: '0.74rem', padding: '0.15rem 0.45rem' }}>
@@ -2599,7 +2627,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                   <div className="font-section-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
                       <span className="sub-toggle-label" style={{ margin: 0, fontWeight: 600, color: 'var(--text-secondary)' }}>
-                        // {t.studio.fontFamily}
+                        {t.studio.fontFamily}
                       </span>
                       <span className="badge" style={{ fontSize: '0.68rem', padding: '0.1rem 0.45rem', opacity: 0.85 }}>
                         {captionFont}
@@ -2805,7 +2833,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                   <div className="studio-sub-toggle" style={{ marginTop: '0.75rem', flexDirection: 'column', alignItems: 'stretch' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                       <span className="sub-toggle-label" style={{ margin: 0 }}>
-                        {t.studio.subYBottomLabel || "// Subtitle Bottom Position:"}
+                        {t.studio.subYBottomLabel || "Subtitle Bottom Position:"}
                       </span>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <span className="badge" style={{ fontSize: '0.74rem', padding: '0.15rem 0.45rem' }}>
@@ -3892,6 +3920,99 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
             </div>
           </div>
 
+          {/* Smart Editing: AI-assisted editing passes applied by the server render */}
+          <div className="studio-card-group group-smart">
+            <div className="group-header" style={{ marginBottom: '0.65rem' }}>
+              <span className="group-title">{t.smart.title}</span>
+              <span className="group-badge">{t.smart.badge}</span>
+            </div>
+            <p className="smart-hint">{t.smart.hint}</p>
+            <div className="smart-grid">
+              {([
+                ['dynamicTracking', t.smart.tracking, t.smart.trackingDesc],
+                ['removeSilence', t.smart.silence, t.smart.silenceDesc],
+                ['teaserHook', t.smart.teaser, t.smart.teaserDesc],
+                ['autoZoom', t.smart.zoom, t.smart.zoomDesc],
+                ['bgmDucking', t.smart.ducking, t.smart.duckingDesc],
+                ['generateThumbnail', t.smart.thumbnail, t.smart.thumbnailDesc],
+              ] as const).map(([key, label, desc]) => (
+                <label key={key} className={`smart-toggle ${smartEditing[key] ? 'on' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(smartEditing[key])}
+                    onChange={(e) => updateSmartEditing({ [key]: e.target.checked } as Partial<SmartEditingSettings>)}
+                  />
+                  <span className="smart-switch" aria-hidden="true" />
+                  <span className="smart-text">
+                    <span className="smart-label">{label}</span>
+                    <span className="smart-desc">{desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            {(smartEditing.removeSilence || smartEditing.teaserHook) && (
+              <div className="smart-params">
+                {smartEditing.removeSilence && (
+                  <label className="smart-param">
+                    <span>{t.smart.silenceMin}</span>
+                    <input
+                      type="range" min={0.3} max={2} step={0.1}
+                      value={smartEditing.silenceMinDuration}
+                      onChange={(e) => updateSmartEditing({ silenceMinDuration: Number(e.target.value) })}
+                    />
+                    <span className="smart-value">{smartEditing.silenceMinDuration.toFixed(1)}s</span>
+                  </label>
+                )}
+                {smartEditing.teaserHook && (
+                  <label className="smart-param">
+                    <span>{t.smart.teaserLength}</span>
+                    <input
+                      type="range" min={2} max={5} step={0.5}
+                      value={smartEditing.teaserDuration}
+                      onChange={(e) => updateSmartEditing({ teaserDuration: Number(e.target.value) })}
+                    />
+                    <span className="smart-value">{smartEditing.teaserDuration.toFixed(1)}s</span>
+                  </label>
+                )}
+              </div>
+            )}
+
+            <div className="smart-row">
+              <span className="smart-row-label">{t.smart.captionTiming}</span>
+              <div className="smart-pills">
+                <button type="button" className={`pill-btn ${smartEditing.captionTiming === 'auto' ? 'active' : ''}`} onClick={() => updateSmartEditing({ captionTiming: 'auto' })}>
+                  {t.smart.timingAuto}
+                </button>
+                <button type="button" className={`pill-btn ${smartEditing.captionTiming === 'whisper' ? 'active' : ''}`} onClick={() => updateSmartEditing({ captionTiming: 'whisper' })}>
+                  {t.smart.timingWhisper}
+                </button>
+              </div>
+            </div>
+
+            <div className="smart-row">
+              <span className="smart-row-label">{t.smart.safeZone}</span>
+              <div className="smart-pills">
+                <button
+                  type="button"
+                  className="pill-btn"
+                  onClick={() => {
+                    // Title just below the app's top bar, captions above the username/caption block
+                    setIsCustomTitleY(true);
+                    setTitleYPercent(Math.round((SAFE_ZONE.top + 0.02) * 1000) / 10);
+                    setSubtitlePositionMode('bottom');
+                    setSubtitleYPercent(Math.round((SAFE_ZONE.bottom + 0.07) * 1000) / 10);
+                  }}
+                >
+                  {t.smart.safeApply}
+                </button>
+                <button type="button" className={`pill-btn ${showSafeZones ? 'active' : ''}`} onClick={() => setShowSafeZones(v => !v)}>
+                  {t.smart.safeGuides}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* 10. Hardware Acceleration & Video Encoder (Placed at the very bottom of controls pane) */}
           <div className="studio-card-group group-hw">
             <div className="group-header" style={{ marginBottom: '0.65rem' }}>
@@ -4323,12 +4444,21 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                       {/* Badge for Split Mode Bottom Feed */}
                       {streamerPreset === 'split_top_cam' && (
                         <div className="wireframe-gameplay-badge">
-                          // GAMEPLAY ({aspectRatio})
+                          GAMEPLAY ({aspectRatio})
                         </div>
                       )}
                     </div>
                   </div>
                 </div>
+
+                {/* Platform safe-zone guides (areas covered by TikTok / Reels / Shorts UI) */}
+                {showSafeZones && !isLandscape && (
+                  <div className="safe-zone-overlay" aria-hidden="true">
+                    <div className="safe-zone-band" style={{ top: 0, left: 0, right: 0, height: `${SAFE_ZONE.top * 100}%` }} />
+                    <div className="safe-zone-band" style={{ bottom: 0, left: 0, right: 0, height: `${SAFE_ZONE.bottom * 100}%` }} />
+                    <div className="safe-zone-band" style={{ top: `${SAFE_ZONE.top * 100}%`, bottom: `${SAFE_ZONE.bottom * 100}%`, right: 0, width: `${SAFE_ZONE.right * 100}%` }} />
+                  </div>
+                )}
 
                 {/* Title Overlay with Real-time Up/Down Position & Scaled Font */}
                 {titlePosition !== 'none' && isTitleVisibleInPreview && (
@@ -5160,14 +5290,26 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                       {clip.status === 'rendering' && <span style={{ fontSize: '0.68rem', color: '#3b82f6' }}>{t.studio.statusRenderingShort}</span>}
                       {clip.status === 'completed' && (
                         clip.download_url ? (
-                          <a
-                            href={dlUrlWithTitle}
-                            download={`${finalClipName}.mp4`}
-                            className="quick-dl-btn"
-                            title={`Download ${finalClipName}.mp4`}
-                          >
-                            ⬇️ MP4
-                          </a>
+                          <span style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                            <a
+                              href={dlUrlWithTitle}
+                              download={`${finalClipName}.mp4`}
+                              className="quick-dl-btn"
+                              title={`Download ${finalClipName}.mp4`}
+                            >
+                              ⬇️ MP4
+                            </a>
+                            {clip.thumbnail_url && (
+                              <a
+                                href={`${clip.thumbnail_url}?title=${encodeURIComponent(finalClipName)}`}
+                                download={`${finalClipName}.jpg`}
+                                className="quick-dl-btn"
+                                title={`Download ${finalClipName}.jpg`}
+                              >
+                                🖼️ Cover
+                              </a>
+                            )}
+                          </span>
                         ) : (
                           <span className="quick-dl-btn" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981' }}>
                             ✓ Done

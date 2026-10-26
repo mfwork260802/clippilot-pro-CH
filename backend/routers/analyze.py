@@ -1016,9 +1016,9 @@ async def analyze_video(request: AnalyzeRequest):
                 ViralClip(title="Introductory overview of the tool", start_time=0.0,  end_time=11.0, hook_time=3.0, virality_score=72,
                           key_quotes=["Hello and welcome.", "Finds viral hotspots."],
                           transcript="Hello and welcome. It finds viral hotspots and highlights them.",
-                          title_suggestion="Meet Cheat Clip Pro AI",
+                          title_suggestion="Meet Clipper Hub AI",
                           caption_suggestion="Say hello to your new AI co-editor. Find the absolute best parts of any video instantly.",
-                          hashtag_suggestion="#cheatclippro #aiediting #growthmindset"),
+                          hashtag_suggestion="#clipperhub #aiediting #growthmindset"),
             ]
             mock_heatmap = [
                 HeatmapPoint(start_time=i*10.0, end_time=(i+1)*10.0,

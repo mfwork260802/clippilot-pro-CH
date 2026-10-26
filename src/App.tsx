@@ -4745,7 +4745,7 @@ Transcript:
                                 )}
                                 {matchedQuote && (
                                   <div style={{ fontSize: '0.72rem', color: '#7aa7ff', marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                                    <span style={{ fontWeight: 600 }}>// {t.form.matchedQuoteLabel}:</span>
+                                    <span style={{ fontWeight: 600 }}>{t.form.matchedQuoteLabel}:</span>
                                     <span style={{ fontStyle: 'italic', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>"{matchedQuote}"</span>
                                   </div>
                                 )}

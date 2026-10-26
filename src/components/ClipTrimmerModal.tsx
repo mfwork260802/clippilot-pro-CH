@@ -558,6 +558,22 @@ export const ClipTrimmerModal: React.FC<ClipTrimmerModalProps> = ({
     return transcript.filter(line => line.end >= minTimelineStart && line.start <= maxTimelineEnd);
   }, [transcript, minTimelineStart, maxTimelineEnd]);
 
+  // Move both handles to the nearest sentence boundary (within 3s) so the cut never lands mid-word.
+  // Boundaries next to sentence punctuation win over plain line breaks.
+  const snapToSentences = (start: number, end: number): [number, number] => {
+    const lines = [...relevantTranscript].sort((a, b) => a.start - b.start);
+    const endsSentence = (text: string) => /[.?!…]\s*$/.test(text.trim());
+    const pick = (cands: { t: number; strong: boolean }[], target: number) =>
+      cands
+        .filter(c => Math.abs(c.t - target) <= 3)
+        .sort((a, b) => Number(b.strong) - Number(a.strong) || Math.abs(a.t - target) - Math.abs(b.t - target))[0]?.t;
+    const starts = lines.map((l, i) => ({ t: l.start, strong: i === 0 || endsSentence(lines[i - 1].text) }));
+    const ends = lines.map(l => ({ t: l.end, strong: endsSentence(l.text) }));
+    const newStart = Math.max(minTimelineStart, pick(starts, start) ?? start);
+    const newEnd = Math.min(maxTimelineEnd, pick(ends, end) ?? end);
+    return newEnd - newStart >= 3 ? [newStart, newEnd] : [start, end];
+  };
+
   // Construct adjusted clip object for downloading
   const getAdjustedClip = (): ViralClip => ({
     virality_score: 85,
@@ -1022,6 +1038,20 @@ export const ClipTrimmerModal: React.FC<ClipTrimmerModalProps> = ({
                   >
                     {t.trimmer.presetMax2m}
                   </button>
+                  <button
+                    type="button"
+                    disabled={isDownloading || relevantTranscript.length === 0}
+                    onClick={() => {
+                      const [s2, e2] = snapToSentences(adjustedStart, adjustedEnd);
+                      setAdjustedStart(s2);
+                      setAdjustedEnd(e2);
+                      seekToTime(s2, false);
+                    }}
+                    title={t.trimmer.snapSentenceHint}
+                    style={{ background: 'rgba(61, 123, 255, 0.12)', border: '1px solid rgba(122, 167, 255, 0.5)', color: '#7aa7ff', borderRadius: 10, padding: '0.25rem 0.55rem', fontSize: '0.72rem', cursor: isDownloading ? 'not-allowed' : 'pointer', fontWeight: 700 }}
+                  >
+                    {t.trimmer.snapSentence}
+                  </button>
                 </div>
               </div>
             </div>
@@ -1425,7 +1455,7 @@ export const ClipTrimmerModal: React.FC<ClipTrimmerModalProps> = ({
               {showTranscript && (
                 <>
                   <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', margin: '0 0 0.5rem 0', fontFamily: 'var(--font-mono)' }}>
-                    // {t.trimmer.transcriptHint}
+                    {t.trimmer.transcriptHint}
                   </p>
                   <div style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.3rem', paddingRight: '0.3rem' }}>
                     {relevantTranscript.map((line, idx) => {

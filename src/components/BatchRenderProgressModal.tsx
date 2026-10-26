@@ -90,7 +90,12 @@ export const BatchRenderProgressModal: React.FC<BatchRenderProgressModalProps> =
                         className={styles.btnDownloadClip}
                         title={t.batchProgress.downloadMp4Tooltip}
                       >
-                        [v] MP4
+                        MP4
+                      </a>
+                    )}
+                    {clip.thumbnail_url && (
+                      <a href={clip.thumbnail_url} download className={styles.btnDownloadClip} title="Cover JPG">
+                        Cover
                       </a>
                     )}
                   </div>
