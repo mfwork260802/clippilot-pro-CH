@@ -5918,6 +5918,7 @@ Transcript:
               allowAppUpdates={allowAppUpdates}
               onOpenCookiesModal={() => setIsCookiesModalOpen(true)}
               onBackToClips={() => setWorkflowTab('clips')}
+              transcript={result.transcript}
             />
           </div>
         )}

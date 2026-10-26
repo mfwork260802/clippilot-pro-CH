@@ -38,6 +38,7 @@ import type {
   HardwareAccelOption,
   HardwareAccelInfo,
   FontItem,
+  TranscriptLine,
 } from '../types';
 
 interface ClipStudioSectionProps {
@@ -56,7 +57,19 @@ interface ClipStudioSectionProps {
   allowAppUpdates?: boolean;
   onOpenCookiesModal?: () => void;
   onBackToClips?: () => void;
+  transcript?: TranscriptLine[] | null;
 }
+
+// Highlight colour of the active word for each subtitle style (matches the rendered ASS styles).
+const CAPTION_HIGHLIGHT_COLORS: Record<string, string> = {
+  viral_pop: '#FFE600',
+  beast_punch: '#00FF66',
+  cyber_violet: '#D946EF',
+  fire_red: '#FF2E2E',
+  electric_cyan: '#00F0FF',
+  golden_aura: '#FFB800',
+  clean_minimal: '#ffffff',
+};
 
 function getFriendlyErrorMessage(rawMsg: string): string {
   if (!rawMsg) return 'Rendering failed unexpectedly.';
@@ -298,6 +311,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
   allowAppUpdates = false,
   onOpenCookiesModal,
   onBackToClips,
+  transcript,
 }) => {
   const { t } = useLanguage();
   const isYouTube = !videoId?.startsWith('upload_') && !videoId?.startsWith('gdrive_') && !videoUrl?.includes('/api/video');
@@ -427,19 +441,16 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
   const [hasWebCodecs] = useState<boolean>(() => isWebCodecsGpuSupported());
 
   // Hardware acceleration / Video Encoder state:
-  // - On Mobile: default to 'auto' (Server Render) to avoid mobile OOM / tab crashes.
-  // - On Desktop (deployed): default to 'client_gpu' / 'browser_wasm' to use user's local GPU/CPU and avoid burdening the server.
-  // - On Desktop (localhost): default to 'auto'.
+  // - Default to 'auto' (server FFmpeg render) everywhere; mobile always uses it to avoid tab crashes.
+  // - A previously saved browser engine is not restored, since it skips most studio effects.
   const [hardwareAccel, setHardwareAccel] = useState<HardwareAccelOption>(() => {
     if (isMobileDevice()) {
       return 'auto';
     }
-    const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-    if (!isLocal) {
-      return isWebCodecsGpuSupported() ? 'client_gpu' : 'browser_wasm';
-    }
+    // This deployment is private, so default to the server FFmpeg engine: it is the only one
+    // that applies face framing, facecam layouts, subtitles, hook timing, music and watermarks.
     const saved = getSavedStudioPreferences().hardwareAccel;
-    return (saved && saved !== 'browser_wasm') ? saved : 'auto';
+    return (saved && saved !== 'browser_wasm' && saved !== 'client_gpu') ? saved : 'auto';
   });
   const [hardwareInfo, setHardwareInfo] = useState<HardwareAccelInfo | null>(null);
   const [hwDropdownOpen, setHwDropdownOpen] = useState<boolean>(false);
@@ -467,11 +478,6 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
       return;
     }
 
-    if (!isLocalhost) {
-      // On deployed domain for desktop users, use client engine (prefer client_gpu) to spare server
-      setHardwareAccel(isWebCodecsGpuSupported() ? 'client_gpu' : 'browser_wasm');
-      return;
-    }
     fetchHardwareSupport();
   }, []);
 
@@ -582,6 +588,22 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
   const currentPreviewClip = allClips[previewClipIndex] || allClips[0] || null;
   const clipStart = currentPreviewClip ? currentPreviewClip.start_time : 0;
   const clipEnd = currentPreviewClip ? currentPreviewClip.end_time : 60;
+
+  // Live preview mirrors the render: the hook banner only shows for the chosen opening seconds.
+  const titleVisibleSeconds = titleDuration === '5s' ? 5 : titleDuration === '10s' ? 10 : Infinity;
+  const isTitleVisibleInPreview = currentTime - clipStart < titleVisibleSeconds;
+
+  // Live preview subtitle: the transcript words spoken at the current time (up to 4, karaoke-style),
+  // falling back to the style sample when no transcript line covers this moment.
+  const previewCaptionWords = (() => {
+    const line = (transcript || []).find(l => currentTime >= l.start && currentTime <= l.end);
+    if (!line || !line.text) return null;
+    const words = line.text.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return null;
+    const span = Math.max(0.01, line.end - line.start);
+    const spoken = Math.min(words.length, Math.max(1, Math.ceil(((currentTime - line.start) / span) * words.length)));
+    return words.slice(Math.max(0, spoken - 4), spoken);
+  })();
   const clipDuration = Math.max(1, clipEnd - clipStart);
 
   // Fetch face/object detection coordinates
@@ -714,6 +736,12 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
             onStateChange: (event: any) => {
               if (event.data === 1) {
                 // PLAYING
+                try {
+                  if (typeof event.target.unloadModule === 'function') {
+                    event.target.unloadModule('captions');
+                    event.target.unloadModule('cc');
+                  }
+                } catch (e) {}
                 setIsPlaying(true);
                 startTracking();
               } else {
@@ -1667,7 +1695,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
       originalAudioVolume,
       // Hardware Acceleration / Video Encoder
       hardwareAccel,
-      renderEngine: isMobileDevice() ? 'server' : (hardwareAccel === 'browser_wasm' ? 'client' : 'server'),
+      renderEngine: isMobileDevice() ? 'server' : (hardwareAccel === 'browser_wasm' || hardwareAccel === 'client_gpu' ? 'client' : 'server'),
       // Multi-Segment Merged Highlight Video
       renderMode,
       compilationTitle: compilationTitle.trim() || undefined,
@@ -3958,7 +3986,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                             value: 'client_gpu' as HardwareAccelOption,
                             badge: 'GPU',
                             title: `Client GPU Acceleration (${clientGpuName})`,
-                            desc: 'Native WebCodecs VideoEncoder running directly on user GPU (0% Server CPU)',
+                            desc: 'Native WebCodecs VideoEncoder running directly on user GPU (0% Server CPU) · Fitur terbatas: tanpa subtitle, face tracking, facecam, BGM & watermark',
                             status: 'Client GPU Native',
                             isReady: true,
                             disabled: false,
@@ -3967,7 +3995,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                             value: 'browser_wasm' as HardwareAccelOption,
                             badge: 'WASM',
                             title: t.studio.hwWasm,
-                            desc: t.studio.hwWasmDesc || 'Browser engine client-side (0% server CPU)',
+                            desc: `${t.studio.hwWasmDesc || 'Browser engine client-side (0% server CPU)'} · Fitur terbatas: tanpa subtitle, face tracking, facecam, BGM & watermark`,
                             status: 'Client Engine',
                             isReady: true,
                             disabled: false,
@@ -4014,7 +4042,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                             value: 'client_gpu' as HardwareAccelOption,
                             badge: 'GPU',
                             title: `Client GPU Acceleration (${clientGpuName})`,
-                            desc: 'WebCodecs GPU Hardware Encoder (0% Server CPU / RAM)',
+                            desc: 'WebCodecs GPU Hardware Encoder (0% Server CPU / RAM) · Fitur terbatas: tanpa subtitle, face tracking, facecam, BGM & watermark',
                             status: 'Client GPU Native',
                             isReady: true,
                             disabled: false,
@@ -4023,7 +4051,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                             value: 'browser_wasm' as HardwareAccelOption,
                             badge: 'WASM',
                             title: t.studio.hwWasm || 'Browser Engine (WASM Fallback)',
-                            desc: 'Client-Side WebAssembly Software Engine (0% Server CPU / RAM)',
+                            desc: 'Client-Side WebAssembly Software Engine (0% Server CPU / RAM) · Fitur terbatas: tanpa subtitle, face tracking, facecam, BGM & watermark',
                             status: 'Active Client Engine',
                             isReady: true,
                             disabled: false,
@@ -4303,7 +4331,7 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                 </div>
 
                 {/* Title Overlay with Real-time Up/Down Position & Scaled Font */}
-                {titlePosition !== 'none' && (
+                {titlePosition !== 'none' && isTitleVisibleInPreview && (
                   <div
                     className="wireframe-title-overlay"
                     style={{
@@ -4382,46 +4410,59 @@ export const ClipStudioSection: React.FC<ClipStudioSectionProps> = ({
                         display: 'inline-block',
                       }}
                     >
-                      {captionStyle === 'viral_pop' && (
+                      {previewCaptionWords ? (
+                        previewCaptionWords.map((word, i) => (
+                          <span
+                            key={i}
+                            style={{ color: i === previewCaptionWords.length - 1 ? (CAPTION_HIGHLIGHT_COLORS[captionStyle] || '#ffffff') : '#ffffff' }}
+                          >
+                            {applyLetterCase(word, textCase)}{i < previewCaptionWords.length - 1 ? ' ' : ''}
+                          </span>
+                        ))
+                      ) : (
                         <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('VIRAL', textCase)}</span>{' '}
-                          <span style={{ color: '#FFE600' }}>{applyLetterCase('POP', textCase)}</span>
+                        {captionStyle === 'viral_pop' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('VIRAL', textCase)}</span>{' '}
+                            <span style={{ color: '#FFE600' }}>{applyLetterCase('POP', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'beast_punch' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('UNREAL', textCase)}</span>{' '}
+                            <span style={{ color: '#00FF66' }}>{applyLetterCase('HACK', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'cyber_violet' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('CYBER', textCase)}</span>{' '}
+                            <span style={{ color: '#D946EF' }}>{applyLetterCase('PUNCH', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'fire_red' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('HOT', textCase)}</span>{' '}
+                            <span style={{ color: '#FF2E2E' }}>{applyLetterCase('FIRE', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'electric_cyan' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('ELECTRIC', textCase)}</span>{' '}
+                            <span style={{ color: '#00F0FF' }}>{applyLetterCase('CYAN', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'golden_aura' && (
+                          <>
+                            <span style={{ color: '#ffffff' }}>{applyLetterCase('GOLDEN', textCase)}</span>{' '}
+                            <span style={{ color: '#FFB800' }}>{applyLetterCase('MOMENT', textCase)}</span>
+                          </>
+                        )}
+                        {captionStyle === 'clean_minimal' && (
+                          <span style={{ color: '#ffffff' }}>
+                            {applyLetterCase('CLEAN SUBTITLE', textCase)}
+                          </span>
+                        )}
                         </>
-                      )}
-                      {captionStyle === 'beast_punch' && (
-                        <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('UNREAL', textCase)}</span>{' '}
-                          <span style={{ color: '#4ade80' }}>{applyLetterCase('HACK', textCase)}</span>
-                        </>
-                      )}
-                      {captionStyle === 'cyber_violet' && (
-                        <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('CYBER', textCase)}</span>{' '}
-                          <span style={{ color: '#5b8cff' }}>{applyLetterCase('PUNCH', textCase)}</span>
-                        </>
-                      )}
-                      {captionStyle === 'fire_red' && (
-                        <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('HOT', textCase)}</span>{' '}
-                          <span style={{ color: '#FF2E2E' }}>{applyLetterCase('FIRE', textCase)}</span>
-                        </>
-                      )}
-                      {captionStyle === 'electric_cyan' && (
-                        <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('ELECTRIC', textCase)}</span>{' '}
-                          <span style={{ color: '#7aa7ff' }}>{applyLetterCase('CYAN', textCase)}</span>
-                        </>
-                      )}
-                      {captionStyle === 'golden_aura' && (
-                        <>
-                          <span style={{ color: '#ffffff' }}>{applyLetterCase('GOLDEN', textCase)}</span>{' '}
-                          <span style={{ color: '#FFB800' }}>{applyLetterCase('MOMENT', textCase)}</span>
-                        </>
-                      )}
-                      {captionStyle === 'clean_minimal' && (
-                        <span style={{ color: '#ffffff' }}>
-                          {applyLetterCase('CLEAN SUBTITLE', textCase)}
-                        </span>
                       )}
                     </span>
                   </div>

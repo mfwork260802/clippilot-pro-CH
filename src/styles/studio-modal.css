@@ -511,9 +511,9 @@
 
 .pop-yellow { color: #ffe600; text-shadow: 0 0 8px rgba(255, 230, 0, 0.6); }
 .pop-green  { color: #00ff7f; text-shadow: 0 0 8px rgba(0, 255, 127, 0.6); }
-.pop-violet { color: #5b8cff; text-shadow: 0 0 8px rgba(91, 140, 255, 0.6); }
+.pop-violet { color: #d946ef; text-shadow: 0 0 8px rgba(217, 70, 239, 0.6); }
 .pop-red    { color: #ff2e2e; text-shadow: 0 0 8px rgba(255, 46, 46, 0.6); }
-.pop-cyan   { color: #7aa7ff; text-shadow: 0 0 8px rgba(122, 167, 255, 0.6); }
+.pop-cyan   { color: #00f0ff; text-shadow: 0 0 8px rgba(0, 240, 255, 0.6); }
 .pop-gold   { color: #ffb800; text-shadow: 0 0 8px rgba(255, 184, 0, 0.6); }
 .pill-badge { background: rgba(0, 0, 0, 0.7); padding: 0.1rem 0.4rem; border-radius: var(--radius-sm); }
 
