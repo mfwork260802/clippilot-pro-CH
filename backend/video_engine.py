@@ -297,13 +297,14 @@ def get_whisper_model():
         if _WHISPER_MODEL is None:
             try:
                 import whisper
-                # Prefer 'small' model (better vocabulary & multi-lingual accuracy, esp. Indonesian speech)
-                # Falls back to 'base' if 'small' cannot be loaded
+                # 'small' is more accurate (esp. Indonesian speech) but needs ~2 GB RAM;
+                # WHISPER_MODEL=base or tiny keeps low-memory servers from being killed.
+                model_name = os.environ.get("WHISPER_MODEL", "small").strip() or "small"
                 try:
-                    logger.info("Loading Whisper 'small' model for high-accuracy word-level timestamps...")
-                    _WHISPER_MODEL = whisper.load_model("small")
-                except Exception as e_small:
-                    logger.warning(f"Could not load Whisper 'small' model ({e_small}). Falling back to 'base'...")
+                    logger.info(f"Loading Whisper '{model_name}' model for word-level timestamps...")
+                    _WHISPER_MODEL = whisper.load_model(model_name)
+                except Exception as e_model:
+                    logger.warning(f"Could not load Whisper '{model_name}' model ({e_model}). Falling back to 'base'...")
                     _WHISPER_MODEL = whisper.load_model("base")
             except Exception as e:
                 logger.warning(f"Could not load Whisper model: {e}")

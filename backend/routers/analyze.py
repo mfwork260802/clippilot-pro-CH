@@ -54,7 +54,7 @@ from backend.services.youtube_service import (
 )
 from backend.utils.heatmap import get_average_heatmap_value
 from backend.utils.proxy import get_proxy_url
-from backend.utils.sse import _sse
+from backend.utils.sse import _sse, with_heartbeat
 from backend.utils.text import (
     detect_transcript_language,
     validate_transcript_language,
@@ -1754,7 +1754,7 @@ async def analyze_video(request: AnalyzeRequest):
         yield _sse({"done": True, "result": final_result.model_dump()})
 
     return StreamingResponse(
-        stream(),
+        with_heartbeat(stream()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
