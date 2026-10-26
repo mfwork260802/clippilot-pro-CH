@@ -1,4 +1,5 @@
 import os
+import random
 import requests
 from urllib.parse import urlsplit
 from typing import Optional
@@ -54,6 +55,27 @@ def get_proxy_url() -> Optional[str]:
         return f"http://{user_clean}{loc_suffix}-rotate:{ws_pass}@p.webshare.io:80"
 
     return None
+
+def get_download_proxy_url() -> Optional[str]:
+    """Proxy URL for yt-dlp / ffmpeg media downloads.
+
+    YouTube stream URLs are bound to the IP that extracted them, so a rotating proxy (new IP per
+    request) breaks the download half-way. For Webshare credentials we pin one proxy from the list
+    (username-N) per call instead of -rotate. Set WEBSHARE_STICKY=0 to keep rotating.
+    """
+    ws_user = os.environ.get("WEBSHARE_USERNAME", "").strip()
+    ws_pass = os.environ.get("WEBSHARE_PASSWORD", "").strip()
+    explicit = any(os.environ.get(k) for k in ("PROXY_URL", "WEBSHARE_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"))
+    sticky = os.environ.get("WEBSHARE_STICKY", "1").strip().lower() not in ("0", "false", "no")
+    if explicit or not (ws_user and ws_pass) or not sticky or os.environ.get("WEBSHARE_LOCATIONS", "").strip():
+        return get_proxy_url()
+    try:
+        count = max(1, int(os.environ.get("WEBSHARE_PROXY_COUNT", "10")))
+    except ValueError:
+        count = 10
+    user_clean = ws_user[:-7] if ws_user.endswith("-rotate") else ws_user
+    return f"http://{user_clean}-{random.randint(1, count)}:{ws_pass}@p.webshare.io:80"
+
 
 def get_youtube_transcript_proxy_config(custom_proxy: Optional[str] = None):
     """

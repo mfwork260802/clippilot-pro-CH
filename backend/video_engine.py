@@ -525,9 +525,30 @@ def get_yt_dlp_cookies_args() -> List[str]:
     return []
 
 
+# Format selectors that never fall back to an audio-only stream. Plain "best" does: when a client
+# only offers audio formats (common behind proxies / without PO tokens), yt-dlp picks the audio.
+def video_format_selector(max_height: Optional[int] = None) -> str:
+    h = f"[height<={max_height}]" if max_height else ""
+    return f"bv*{h}+ba/b{h}[vcodec!=none]/bv*+ba/b[vcodec!=none]"
+
+
+def _download_proxy() -> Optional[str]:
+    try:
+        from backend.utils.proxy import get_download_proxy_url
+        return get_download_proxy_url()
+    except Exception:
+        return None
+
+
+# Alternate YouTube player clients to try when the default ones return no usable video formats.
+ALT_PLAYER_CLIENTS = ["tv_simply,android_vr,ios", "web_safari,mweb,tv"]
+
+
 def get_yt_dlp_base_cmd(
     include_cookies: bool = True,
     cookies_path: Optional[Union[str, Path]] = None,
+    player_clients: Optional[str] = None,
+    proxy_url: Optional[str] = None,
 ) -> List[str]:
     """
     Returns base command for yt-dlp with JavaScript runtime, player extractor args, and cookies.
@@ -565,16 +586,40 @@ def get_yt_dlp_base_cmd(
 
     # Route video downloads through the configured proxy too (PROXY_URL / WEBSHARE_*), not only
     # transcript requests; cloud IPs are usually blocked by YouTube.
-    try:
-        from backend.utils.proxy import get_proxy_url
-        proxy = get_proxy_url()
-    except Exception:
-        proxy = None
+    proxy = proxy_url
+    if proxy is None:
+        try:
+            from backend.utils.proxy import get_download_proxy_url
+            proxy = get_download_proxy_url()
+        except Exception:
+            proxy = None
     if proxy:
         cmd.extend(["--proxy", proxy])
 
+    if player_clients:
+        cmd.extend(["--extractor-args", f"youtube:player_client={player_clients}"])
+
     cmd.append("--force-ipv4")
     return cmd
+
+
+def has_video_stream(file_path: Union[str, Path]) -> bool:
+    """True when ffprobe finds at least one video stream (downloads must not be audio-only)."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", str(file_path)],
+            capture_output=True, text=True, timeout=8,
+        )
+        return "video" in res.stdout
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+
+
+def is_valid_video_mp4(file_path: Union[str, Path]) -> bool:
+    return is_valid_mp4(file_path) and has_video_stream(file_path)
 
 
 def is_valid_mp4(file_path: Union[str, Path]) -> bool:
@@ -999,7 +1044,10 @@ def download_clip_segment(
 
         for use_cookies in attempts:
             mode_label = "with cookies" if use_cookies else "guest mode (without cookies)"
-            base_cmd = get_yt_dlp_base_cmd(include_cookies=use_cookies, cookies_path=temp_cookies if use_cookies else None)
+            # One proxy IP per attempt: stream URLs are bound to the IP that extracted them.
+            proxy = _download_proxy()
+            cookie_path = temp_cookies if use_cookies else None
+            base_cmd = get_yt_dlp_base_cmd(include_cookies=use_cookies, cookies_path=cookie_path, proxy_url=proxy or "")
             logger.info(f"Downloading HD section ({clip_duration:.1f}s) {t_start_fmt} -> {t_end_fmt} for {clean_url} ({mode_label}, timeout: {timeout_sec}s)")
 
             # Method 1: yt-dlp --download-sections with multi-fragment acceleration, socket timeout, & retries
@@ -1007,7 +1055,7 @@ def download_clip_segment(
                 *base_cmd,
                 "--download-sections", f"*{t_start_fmt}-{t_end_fmt}",
                 "--force-keyframes-at-cuts",
-                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best",
+                "-f", video_format_selector(1080),
                 "-N", "4",
                 "--socket-timeout", "20",
                 "--fragment-retries", "5",
@@ -1020,7 +1068,7 @@ def download_clip_segment(
             ]
             try:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-                if res.returncode == 0 and is_valid_mp4(output_path):
+                if res.returncode == 0 and is_valid_video_mp4(output_path):
                     logger.info(f"Successfully downloaded section ({mode_label}): {output_path} ({output_path.stat().st_size} bytes)")
                     return str(output_path)
                 # If not valid or returncode != 0, clean up any incomplete/corrupt partial file immediately
@@ -1029,7 +1077,7 @@ def download_clip_segment(
                         output_path.unlink()
                     except Exception:
                         pass
-                last_err_snippet = res.stderr[:300] if (res and res.stderr) else "empty output or invalid file (moov atom missing)"
+                last_err_snippet = res.stderr[:300] if (res and res.stderr and res.returncode != 0) else "no video stream returned (audio-only or invalid file)"
             except subprocess.TimeoutExpired:
                 logger.warning(f"yt-dlp download-sections timed out after {timeout_sec}s for {clean_url} ({mode_label}).")
                 if output_path.exists():
@@ -1059,7 +1107,7 @@ def download_clip_segment(
                     *base_cmd,
                     "--socket-timeout", "20",
                     "-g",
-                    "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best",
+                    "-f", video_format_selector(1080),
                     clean_url
                 ]
                 url_res = subprocess.run(url_cmd, capture_output=True, text=True, timeout=30)
@@ -1067,6 +1115,7 @@ def download_clip_segment(
                     urls = url_res.stdout.strip().split("\n")
                     video_stream = urls[0]
                     audio_stream = urls[1] if len(urls) > 1 else urls[0]
+                    proxy_args = ["-http_proxy", proxy] if proxy else []
 
                     trim_timeout = max(240, min(900, int(clip_duration * 4.5) + 60))
                     trim_cmd = [
@@ -1076,8 +1125,10 @@ def download_clip_segment(
                         "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5",
                         "-ss", str(start_time),
+                        *proxy_args,
                         "-i", video_stream,
                         "-ss", str(start_time),
+                        *proxy_args,
                         "-i", audio_stream,
                         "-t", str(clip_duration),
                         "-map", "0:v:0", "-map", "1:a:0?",
@@ -1089,7 +1140,7 @@ def download_clip_segment(
                         str(output_path)
                     ]
                     trim_res = subprocess.run(trim_cmd, capture_output=True, text=True, timeout=trim_timeout)
-                    if trim_res.returncode == 0 and is_valid_mp4(output_path):
+                    if trim_res.returncode == 0 and is_valid_video_mp4(output_path):
                         logger.info(f"Successfully trimmed stream URLs with FFmpeg ({mode_label}): {output_path} ({output_path.stat().st_size} bytes)")
                         return str(output_path)
                     else:
@@ -1117,10 +1168,11 @@ def download_clip_segment(
                     except Exception:
                         pass
                 cmd_720p = [
-                    *base_cmd,
+                    *get_yt_dlp_base_cmd(include_cookies=use_cookies, cookies_path=cookie_path,
+                                         player_clients=ALT_PLAYER_CLIENTS[0], proxy_url=proxy or ""),
                     "--download-sections", f"*{t_start_fmt}-{t_end_fmt}",
                     "--force-keyframes-at-cuts",
-                    "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+                    "-f", video_format_selector(720),
                     "-N", "4",
                     "--socket-timeout", "20",
                     "--fragment-retries", "5",
@@ -1132,7 +1184,7 @@ def download_clip_segment(
                 ]
                 timeout_720p = max(200, min(600, int(clip_duration * 4) + 60))
                 res_720p = subprocess.run(cmd_720p, capture_output=True, text=True, timeout=timeout_720p)
-                if res_720p.returncode == 0 and is_valid_mp4(output_path):
+                if res_720p.returncode == 0 and is_valid_video_mp4(output_path):
                     logger.info(f"Successfully downloaded 720p fallback section ({mode_label}): {output_path} ({output_path.stat().st_size} bytes)")
                     return str(output_path)
                 if output_path.exists():
@@ -1160,10 +1212,11 @@ def download_clip_segment(
                     except Exception:
                         pass
                 cmd_480p = [
-                    *base_cmd,
+                    *get_yt_dlp_base_cmd(include_cookies=use_cookies, cookies_path=cookie_path,
+                                         player_clients=ALT_PLAYER_CLIENTS[1], proxy_url=proxy or ""),
                     "--download-sections", f"*{t_start_fmt}-{t_end_fmt}",
                     "--force-keyframes-at-cuts",
-                    "-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/18/best",
+                    "-f", video_format_selector(480),
                     "-N", "2",
                     "--socket-timeout", "20",
                     "--fragment-retries", "3",
@@ -1175,7 +1228,7 @@ def download_clip_segment(
                 ]
                 timeout_480p = max(150, min(450, int(clip_duration * 3) + 45))
                 res_480p = subprocess.run(cmd_480p, capture_output=True, text=True, timeout=timeout_480p)
-                if res_480p.returncode == 0 and is_valid_mp4(output_path):
+                if res_480p.returncode == 0 and is_valid_video_mp4(output_path):
                     logger.info(f"Successfully downloaded 480p fallback section ({mode_label}): {output_path} ({output_path.stat().st_size} bytes)")
                     return str(output_path)
                 if output_path.exists():
@@ -1258,7 +1311,7 @@ def download_full_raw_video(
             cmd = [
                 *base_cmd,
                 "--no-colors",
-                "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/bestvideo+bestaudio/best",
+                "-f", video_format_selector(1080),
                 "-o", str(output_path),
                 "--merge-output-format", "mp4",
                 "--newline",
@@ -1311,7 +1364,7 @@ def download_full_raw_video(
             process.stdout.close()
             returncode = process.wait()
 
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000 and has_video_stream(output_path):
                 logger.info(f"Full raw video downloaded successfully ({mode_label}, {os.path.getsize(output_path)} bytes)")
                 return str(output_path)
 
@@ -4098,7 +4151,7 @@ def extract_clip_frame(video_url: str, video_id: str, timestamp: float = 0.0, co
 
             slice_cmd = [
                 *base_cmd,
-                "-f", "18/best[height<=720]/best",
+                "-f", "18/" + video_format_selector(720),
                 "--download-sections", f"*{t_start_fmt}-{t_end_fmt}",
                 "-o", str(temp_slice),
                 "--no-warnings",
