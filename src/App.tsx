@@ -4302,8 +4302,9 @@ Transcript:
                         type="button"
                         onClick={() => {
                           setSubtitlesSource('manual');
-                          const fileInput = document.getElementById('manual-subtitle-file');
-                          if (fileInput) fileInput.click();
+                          setShowAdvancedSource(true);
+                          // The file input lives in the advanced section, which renders on the next tick.
+                          setTimeout(() => document.getElementById('manual-subtitle-file')?.click(), 60);
                         }}
                         style={{
                           background: 'rgba(255, 255, 255, 0.05)',
@@ -4321,6 +4322,26 @@ Transcript:
                       >
                         <Upload size={14} />
                         {t.form.uploadCustomSubtitles}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsCookiesModalOpen(true)}
+                        style={{
+                          background: 'rgba(61, 123, 255, 0.14)',
+                          border: '1px solid rgba(122, 167, 255, 0.4)',
+                          color: '#7aa7ff',
+                          borderRadius: 999,
+                          padding: '0.45rem 0.85rem',
+                          fontSize: '0.8rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.45rem'
+                        }}
+                      >
+                        <Bookmark size={14} />
+                        {t.errors.setupCookies}
                       </button>
                     </div>
                     <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.85rem', background: 'rgba(255, 255, 255, 0.03)', borderRadius: 10, borderLeft: '3px solid #f59e0b', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>

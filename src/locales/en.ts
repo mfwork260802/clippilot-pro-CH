@@ -128,6 +128,7 @@ export const en = {
     historyLoadFailed: "Failed to load this history entry.",
   },
   errors: {
+    setupCookies: "Set up YouTube cookies",
     apiKeyRequired: "A Gemini API Key is required to analyze videos. Get a free key at aistudio.google.com and paste it in the field below.",
     invalidStart: "Invalid start time format. Please use MM:SS (e.g. 29:00), HH:MM:SS, or raw seconds.",
     invalidEnd: "Invalid end time format. Please use MM:SS (e.g. 31:15), HH:MM:SS, or raw seconds.",
@@ -139,7 +140,7 @@ export const en = {
     tryAgain: "Try Again",
     getNewKeyLink: "Get free key at Google AI Studio ↗",
     noSubtitlesMsg: "No subtitles could be retrieved for this video. Subtitles might be disabled, or the video may be age-restricted or private.",
-    noSubtitlesTip: "If auto-generated transcripts cannot be retrieved, you can download subtitles manually using a tool like downsub.com, upload the file via the Upload Custom Subtitles option above, and try analyzing the video again.",
+    noSubtitlesTip: "YouTube often blocks cloud servers. Fix it by adding your YouTube cookies (Set up YouTube cookies button), or download the subtitles from downsub.com and upload them with Upload Custom Subtitles, then analyze again.",
   },
   loading: {
     decodingEngagement: "Decoding Video Engagement",

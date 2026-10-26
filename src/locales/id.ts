@@ -131,6 +131,7 @@ export const id: Translations = {
     historyLoadFailed: "Gagal memuat entri riwayat ini.",
   },
   errors: {
+    setupCookies: "Pasang cookies YouTube",
     apiKeyRequired: "Gemini API Key wajib diisi untuk menganalisis video. Dapatkan API key gratis di aistudio.google.com lalu tempel di kolom bawah.",
     invalidStart: "Format waktu mulai tidak valid. Gunakan format MM:SS (misal: 29:00), HH:MM:SS, atau detik.",
     invalidEnd: "Format waktu selesai tidak valid. Gunakan format MM:SS (misal: 31:15), HH:MM:SS, atau detik.",
@@ -142,7 +143,7 @@ export const id: Translations = {
     tryAgain: "Coba Lagi",
     getNewKeyLink: "Dapatkan key gratis di Google AI Studio ↗",
     noSubtitlesMsg: "Tidak dapat mengambil subtitle untuk video ini. Subtitle mungkin dinonaktifkan, atau video dibatasi usia/bersifat privat.",
-    noSubtitlesTip: "Jika transkrip otomatis tidak dapat diambil, Anda dapat mengunduh subtitle secara manual melalui downsub.com, unggah berkas melalui opsi Unggah Subtitle Manual di atas, lalu coba analisis kembali.",
+    noSubtitlesTip: "YouTube sering memblokir server cloud. Atasi dengan memasang cookies YouTube kamu (tombol Pasang cookies YouTube), atau unduh subtitle dari downsub.com lalu unggah lewat Unggah Subtitle Manual, kemudian analisis ulang.",
   },
   loading: {
     decodingEngagement: "Membedah Retensi Video",
