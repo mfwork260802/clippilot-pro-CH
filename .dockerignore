@@ -1,0 +1,11 @@
+node_modules
+dist
+.venv
+venv
+.git
+**/__pycache__
+backend/.env
+backend/temp_clips
+backend/exports
+cookies.txt
+backend/cookies.txt
