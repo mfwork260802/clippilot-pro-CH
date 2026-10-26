@@ -17,18 +17,19 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000 \
     DATA_DIR=/data \
-    WHISPER_MODEL=base
+    WHISPER_MODEL=small \
+    WHISPER_DOWNLOAD_ROOT=/models
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg libgl1 libglib2.0-0 curl \
     && rm -rf /var/lib/apt/lists/*
 
-# CPU-only PyTorch keeps the image much smaller (no GPU on Railway)
 COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --upgrade pip \
-    && pip install torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install -r backend/requirements.txt
+RUN pip install --upgrade pip && pip install -r backend/requirements.txt
+
+# Bake the Whisper model into the image so the first render does not wait for a download
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8', download_root='${WHISPER_DOWNLOAD_ROOT}')"
 
 COPY backend ./backend
 COPY --from=frontend /app/dist ./dist

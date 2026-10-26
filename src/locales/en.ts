@@ -166,6 +166,7 @@ export const en = {
     reconstructingTimestamps: "Reconstructing engagement timestamps from saved analysis...",
   },
   results: {
+    scoreLabels: { hook: "Hook", flow: "Flow", value: "Value", trend: "Trend", shareability: "Shareable" },
     refreshPlayer: "Refresh player",
     downloadRawVideo: "Download full video",
     downloadingRawVideo: "Downloading full video...",

@@ -191,14 +191,18 @@ def download_rendered_file(file_name: str, title: Optional[str] = None):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Rendered clip not found")
 
+    # Covers are JPGs, clips are MP4s
+    ext = ".jpg" if safe_name.lower().endswith(".jpg") else ".mp4"
+    media_type = "image/jpeg" if ext == ".jpg" else "video/mp4"
+
     # If title provided, sanitize and use as download filename
     dl_filename = safe_name
     if title and title.strip():
         clean_title = re.sub(r'[\\/*?:"<>|]', "", title.strip())
         if clean_title:
-            dl_filename = f"{clean_title}.mp4" if not clean_title.lower().endswith(".mp4") else clean_title
+            dl_filename = clean_title if clean_title.lower().endswith(ext) else f"{clean_title}{ext}"
 
-    return FileResponse(file_path, media_type="video/mp4", filename=dl_filename)
+    return FileResponse(file_path, media_type=media_type, filename=dl_filename)
 
 
 @router.get("/api/download-batch-zip/{batch_id}")

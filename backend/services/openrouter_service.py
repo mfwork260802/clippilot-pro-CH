@@ -258,7 +258,13 @@ async def analyze_with_openrouter(
         '      "key_quotes": ["quote 1", "quote 2"],\n'
         '      "title_suggestion": "Alternative viral hook title",\n'
         '      "caption_suggestion": "Social media post caption",\n'
-        '      "hashtag_suggestion": "#hashtag1 #hashtag2"\n'
+        '      "hashtag_suggestion": "#hashtag1 #hashtag2",\n'
+        '      "score_hook": 8,\n'
+        '      "score_flow": 7,\n'
+        '      "score_value": 9,\n'
+        '      "score_trend": 6,\n'
+        '      "score_shareability": 8,\n'
+        '      "score_reason": "One sentence on the strongest and weakest dimension"\n'
         "    }\n"
         "  ]\n"
         "}"

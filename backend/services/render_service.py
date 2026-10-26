@@ -18,6 +18,15 @@ from backend.config import (
     render_title_overlay_png,
     transcribe_clip_words,
 )
+from backend.video_engine import (
+    check_has_audio,
+    make_thumbnail,
+    prepend_teaser,
+    remap_time,
+    remove_silent_gaps,
+    validate_render,
+    zoom_keyframes,
+)
 from backend.schemas.render import RenderBatchRequest, RenderSettingsModel
 
 RENDER_BATCHES: Dict[str, Dict[str, Any]] = {}
@@ -71,6 +80,19 @@ async def render_single_batch_clip(
                 "Network lag interrupted the download. Please retry rendering this clip."
             )
 
+        # 1b. Optional: cut silent gaps so the clip is tighter (times are remapped through kept_ranges)
+        kept_ranges = None
+        if settings.remove_silence:
+            clip_status["error_message"] = "Removing silent gaps..."
+            tight_path = str(TEMP_DIR / f"{batch_id}_clip_{idx}_tight.mp4")
+            new_path, kept = await asyncio.to_thread(
+                remove_silent_gaps, raw_path, tight_path,
+                max(0.3, float(settings.silence_min_duration or 0.6)),
+            )
+            if new_path != raw_path:
+                raw_path, kept_ranges = new_path, kept
+            clip_status["error_message"] = None
+
         # 2. Transcribe & Generate Subtitles / Title (.ass)
         clip_status["status"] = "transcribing"
         clip_status["progress_percent"] = 40
@@ -98,6 +120,8 @@ async def render_single_batch_clip(
 
         skip_ass_title = False
         duration_sec = max(1.0, end_t - start_t)
+        if kept_ranges:
+            duration_sec = max(1.0, sum(b - a for a, b in kept_ranges))
 
         # Check if title has emoji -> render transparent color emoji PNG overlay
         if display_title and settings.title_position != "none" and has_emoji(display_title):
@@ -143,16 +167,19 @@ async def render_single_batch_clip(
             except Exception:
                 pass
 
+        words = []
         if settings.caption_style != "none" or (display_title and settings.title_position != "none" and not skip_ass_title):
-            words = []
             if settings.caption_style != "none":
+                # YouTube caption word timings are only valid on the untrimmed clip
+                prefer_captions = (settings.caption_timing or "auto") != "whisper" and not kept_ranges
                 words = await asyncio.to_thread(
                     transcribe_clip_words,
                     raw_path,
                     transcript,
                     start_t,
                     end_t,
-                    target_lang
+                    target_lang,
+                    prefer_captions,
                 )
             ass_filename = f"{batch_id}_clip_{idx}.ass"
             ass_path = str(TEMP_DIR / ass_filename)
@@ -188,6 +215,7 @@ async def render_single_batch_clip(
 
         out_filename = f"clip_{idx+1}_{batch_id}.mp4"
         out_path = str(EXPORTS_DIR / out_filename)
+        zoom_points = zoom_keyframes(words, duration_sec) if settings.auto_zoom else None
 
         await asyncio.to_thread(
             render_clip_to_mp4,
@@ -216,16 +244,52 @@ async def render_single_batch_clip(
             bgm_path=settings.bgm_file_path,
             bgm_volume=float((settings.bgm_volume if settings.bgm_volume is not None else 25.0) / 100.0),
             bgm_start_offset=float(settings.bgm_start_offset or 0.0),
+            bgm_ducking=bool(settings.bgm_ducking),
             hook_sfx_enabled=bool(settings.hook_sfx_enabled),
             hook_sfx_path=settings.hook_sfx_file_path,
             hook_sfx_volume=float((settings.hook_sfx_volume if settings.hook_sfx_volume is not None else 100.0) / 100.0),
             original_audio_volume=float((settings.original_audio_volume if settings.original_audio_volume is not None else 100.0) / 100.0),
             hardware_accel=settings.hardware_accel or "auto",
-            title_y_percent=settings.title_y_percent
+            title_y_percent=settings.title_y_percent,
+            dynamic_tracking=bool(settings.dynamic_tracking),
+            zoom_points=zoom_points,
         )
 
         if not os.path.exists(out_path) or not is_valid_mp4(out_path):
             raise RuntimeError("Rendered MP4 file is incomplete or missing. Please retry rendering.")
+
+        # Where the hook lands in the rendered (possibly trimmed) clip
+        hook_abs = clip.get("hook_time")
+        hook_rel = max(0.0, float(hook_abs) - start_t) if hook_abs is not None else 0.0
+        if kept_ranges:
+            hook_rel = remap_time(hook_rel, kept_ranges) or 0.0
+        expected_duration = duration_sec
+
+        # 4. Optional teaser: open with the hook moment, then flash into the full clip
+        if settings.teaser_hook:
+            clip_status["error_message"] = "Adding teaser intro..."
+            teaser_len = max(1.5, min(6.0, float(settings.teaser_duration or 3.0)))
+            teaser_tmp = str(TEMP_DIR / f"{batch_id}_clip_{idx}_teaser.mp4")
+            teased = await asyncio.to_thread(prepend_teaser, out_path, teaser_tmp, hook_rel, teaser_len)
+            if teased != out_path:
+                os.replace(teased, out_path)
+                expected_duration += teaser_len - 0.25
+            clip_status["error_message"] = None
+
+        # 5. Never report success for a broken file
+        await asyncio.to_thread(validate_render, out_path, expected_duration, check_has_audio(raw_path))
+
+        # 6. Optional cover image
+        if settings.generate_thumbnail:
+            thumb_filename = f"clip_{idx+1}_{batch_id}.jpg"
+            thumb_size = (1920, 1080) if settings.aspect_ratio == "16:9_landscape" else (1080, 1920)
+            thumb = await asyncio.to_thread(
+                make_thumbnail, raw_path, str(EXPORTS_DIR / thumb_filename),
+                clip_status.get("title") or base_title, min(hook_rel + 0.5, max(0.0, duration_sec - 0.5)),
+                thumb_size,
+            )
+            if thumb:
+                clip_status["thumbnail_url"] = f"/api/download-rendered/{thumb_filename}"
 
         clip_status["status"] = "completed"
         clip_status["progress_percent"] = 100
@@ -518,12 +582,14 @@ async def render_merged_batch_clips(
             bgm_path=settings.bgm_file_path,
             bgm_volume=float((settings.bgm_volume if settings.bgm_volume is not None else 25.0) / 100.0),
             bgm_start_offset=float(settings.bgm_start_offset or 0.0),
+            bgm_ducking=bool(settings.bgm_ducking),
             hook_sfx_enabled=bool(settings.hook_sfx_enabled),
             hook_sfx_path=settings.hook_sfx_file_path,
             hook_sfx_volume=float((settings.hook_sfx_volume if settings.hook_sfx_volume is not None else 100.0) / 100.0),
             original_audio_volume=float((settings.original_audio_volume if settings.original_audio_volume is not None else 100.0) / 100.0),
             hardware_accel=settings.hardware_accel or "auto",
-            title_y_percent=settings.title_y_percent
+            title_y_percent=settings.title_y_percent,
+            dynamic_tracking=bool(settings.dynamic_tracking),
         )
 
         if not os.path.exists(out_path) or not is_valid_mp4(out_path):

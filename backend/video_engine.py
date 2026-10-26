@@ -286,9 +286,44 @@ def ensure_ffmpeg_in_path():
 
 ensure_ffmpeg_in_path()
 
-# Global lazy-loaded whisper model and thread lock for PyTorch attention safety
+# Global lazy-loaded whisper model and a lock so only one transcription runs at a time
 _WHISPER_MODEL = None
 _WHISPER_LOCK = threading.Lock()
+
+
+class FasterWhisperAdapter:
+    """Wraps a faster-whisper model behind the openai-whisper `transcribe()` result shape.
+
+    faster-whisper (CTranslate2, int8 on CPU) is several times faster and uses far less RAM than
+    the PyTorch model, which matters on CPU-only hosts. Callers keep using
+    `model.transcribe(path, **openai_whisper_kwargs)` and get back
+    {"text", "language", "segments": [{"start", "end", "text", "words": [...]}]}.
+    """
+
+    # openai-whisper options that have no faster-whisper equivalent (or are meaningless on CPU)
+    _IGNORED_KWARGS = {"fp16", "verbose"}
+
+    def __init__(self, model):
+        self._model = model
+
+    def transcribe(self, audio_path: str, **kwargs) -> Dict[str, Any]:
+        options = {k: v for k, v in kwargs.items() if k not in self._IGNORED_KWARGS}
+        options.setdefault("beam_size", 5)
+        # Skip long silences before decoding; faster and avoids hallucinated words in dead air.
+        options.setdefault("vad_filter", True)
+        segments_iter, info = self._model.transcribe(str(audio_path), **options)
+        segments = []
+        for seg in segments_iter:
+            words = [
+                {"word": w.word, "start": float(w.start), "end": float(w.end), "probability": float(w.probability)}
+                for w in (seg.words or [])
+            ]
+            segments.append({"start": float(seg.start), "end": float(seg.end), "text": seg.text, "words": words})
+        return {
+            "text": "".join(s["text"] for s in segments),
+            "language": getattr(info, "language", None),
+            "segments": segments,
+        }
 
 
 def get_whisper_model():
@@ -296,16 +331,25 @@ def get_whisper_model():
     with _WHISPER_LOCK:
         if _WHISPER_MODEL is None:
             try:
-                import whisper
-                # 'small' is more accurate (esp. Indonesian speech) but needs ~2 GB RAM;
-                # WHISPER_MODEL=base or tiny keeps low-memory servers from being killed.
+                from faster_whisper import WhisperModel
+                # 'small' is noticeably better for Indonesian speech; with int8 it needs well under 1 GB RAM.
+                # WHISPER_MODEL=base or tiny trades accuracy for speed on very small servers.
                 model_name = os.environ.get("WHISPER_MODEL", "small").strip() or "small"
+                download_root = os.environ.get("WHISPER_DOWNLOAD_ROOT") or None
+                cpu_threads = max(1, os.cpu_count() or 1)
+
+                def _load(name: str):
+                    return FasterWhisperAdapter(
+                        WhisperModel(name, device="cpu", compute_type="int8",
+                                     cpu_threads=cpu_threads, download_root=download_root)
+                    )
+
                 try:
-                    logger.info(f"Loading Whisper '{model_name}' model for word-level timestamps...")
-                    _WHISPER_MODEL = whisper.load_model(model_name)
+                    logger.info(f"Loading faster-whisper '{model_name}' (int8, {cpu_threads} threads)...")
+                    _WHISPER_MODEL = _load(model_name)
                 except Exception as e_model:
-                    logger.warning(f"Could not load Whisper '{model_name}' model ({e_model}). Falling back to 'base'...")
-                    _WHISPER_MODEL = whisper.load_model("base")
+                    logger.warning(f"Could not load faster-whisper '{model_name}' ({e_model}). Falling back to 'base'...")
+                    _WHISPER_MODEL = _load("base")
             except Exception as e:
                 logger.warning(f"Could not load Whisper model: {e}")
                 _WHISPER_MODEL = False
@@ -313,7 +357,7 @@ def get_whisper_model():
 
 
 def release_whisper_model():
-    """Explicitly frees Whisper PyTorch model from RAM to preserve memory on low-spec servers."""
+    """Explicitly frees the Whisper model from RAM to preserve memory on low-spec servers."""
     global _WHISPER_MODEL
     with _WHISPER_LOCK:
         if _WHISPER_MODEL is not None and _WHISPER_MODEL is not False:
@@ -743,7 +787,7 @@ def transcribe_local_video_file(
     if whisper_model is None:
         raise RuntimeError(
             "Whisper speech recognition model could not be loaded on this system. "
-            "Please ensure `openai-whisper` is installed and FFmpeg is in PATH."
+            "Please ensure `faster-whisper` is installed and FFmpeg is in PATH."
         )
 
     if progress_callback:
@@ -1295,12 +1339,47 @@ def clean_caption_text(text: str) -> str:
     return t
 
 
+def caption_words_for_clip(
+    transcript: Optional[List[Dict[str, Any]]],
+    clip_start_time: float,
+    clip_end_time: float,
+) -> List[Dict[str, Any]]:
+    """Clip-relative word timings taken from YouTube auto-caption (json3) word data.
+
+    Returns [] unless the transcript lines overlapping the clip all carry word timings, so a clip
+    is never captioned half from captions and half from guesses.
+    """
+    if not transcript or clip_end_time <= clip_start_time:
+        return []
+    overlapping = [
+        line for line in transcript
+        if float(line.get("start", 0.0)) < clip_end_time
+        and float(line.get("end", float(line.get("start", 0.0)) + float(line.get("duration", 0.0)))) > clip_start_time
+    ]
+    if not overlapping or any(not line.get("words") for line in overlapping):
+        return []
+    words = []
+    for line in overlapping:
+        for w in line["words"]:
+            st, et = float(w.get("start", 0.0)), float(w.get("end", 0.0))
+            if et <= clip_start_time or st >= clip_end_time:
+                continue
+            text = clean_caption_text(str(w.get("word", "")).strip())
+            if not text or text in (".", "..", "...", ",", "?"):
+                continue
+            rel_st = max(0.0, st - clip_start_time)
+            rel_et = min(clip_end_time - clip_start_time, et - clip_start_time)
+            words.append({"word": text, "start": round(rel_st, 2), "end": round(max(rel_et, rel_st + 0.12), 2)})
+    return words if len(words) >= 3 else []
+
+
 def transcribe_clip_words(
     video_path: str,
     fallback_transcript: Optional[List[Dict[str, Any]]] = None,
     clip_start_time: float = 0.0,
     clip_end_time: float = 0.0,
-    target_language: Optional[str] = None
+    target_language: Optional[str] = None,
+    prefer_caption_timing: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Transcribes word-level timestamps directly from the sliced clip audio using Whisper AI.
@@ -1318,6 +1397,13 @@ def transcribe_clip_words(
                 target_language = detected["code"]
         except Exception:
             pass
+
+    # 0. Fast path: YouTube auto-captions already carry per-word timings, so Whisper can be skipped.
+    if prefer_caption_timing:
+        caption_words = caption_words_for_clip(fallback_transcript, clip_start_time, clip_end_time)
+        if caption_words:
+            logger.info(f"Using {len(caption_words)} word timings from YouTube captions (Whisper skipped).")
+            return caption_words
 
     # 1. Primary: Run Whisper directly on sliced clip audio for exact acoustic timestamps
     whisper_model = get_whisper_model()
@@ -2767,6 +2853,230 @@ def detect_speaker_face_box(
     return default_res
 
 
+def detect_silences(media_path: str, noise_db: float = -35.0, min_silence: float = 0.6) -> List[Tuple[float, float]]:
+    """Silent stretches [(start, end), ...] of at least `min_silence` seconds (FFmpeg silencedetect)."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(media_path),
+        "-af", f"silencedetect=n={noise_db}dB:d={min_silence}", "-f", "null", "-",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        logger.warning(f"silencedetect failed: {e}")
+        return []
+    silences, start = [], None
+    for line in res.stderr.splitlines():
+        m_start = re.search(r"silence_start: ([0-9.]+)", line)
+        m_end = re.search(r"silence_end: ([0-9.]+)", line)
+        if m_start:
+            start = float(m_start.group(1))
+        elif m_end and start is not None:
+            silences.append((start, float(m_end.group(1))))
+            start = None
+    return silences
+
+
+def remap_time(t: float, kept: List[Tuple[float, float]]) -> Optional[float]:
+    """Position of original time `t` in a video made by concatenating `kept` ranges (None if cut out)."""
+    offset = 0.0
+    for a, b in kept:
+        if a <= t <= b:
+            return offset + (t - a)
+        offset += b - a
+    return None
+
+
+def remove_silent_gaps(
+    video_path: str,
+    output_path: str,
+    min_silence: float = 0.6,
+    noise_db: float = -35.0,
+    keep_pad: float = 0.12,
+) -> Tuple[str, List[Tuple[float, float]]]:
+    """Cut silent gaps longer than `min_silence` from a clip.
+
+    `keep_pad` seconds of each pause are kept on both sides so speech does not sound clipped.
+    Returns (path, kept_ranges). When nothing is worth cutting, the original path is returned with a
+    single range covering the whole clip, so callers can always remap times through `kept_ranges`.
+    """
+    meta = get_video_file_metadata(video_path) or {}
+    duration = float(meta.get("duration") or 0.0)
+    full = [(0.0, duration)] if duration > 0 else []
+    if duration <= 0 or not check_has_audio(video_path):
+        return video_path, full
+
+    silences = detect_silences(video_path, noise_db=noise_db, min_silence=min_silence)
+    kept, cursor = [], 0.0
+    for s_start, s_end in silences:
+        cut_from, cut_to = s_start + keep_pad, s_end - keep_pad
+        if cut_to - cut_from < 0.2:
+            continue
+        if cut_from > cursor:
+            kept.append((cursor, cut_from))
+        cursor = max(cursor, cut_to)
+    if cursor < duration:
+        kept.append((cursor, duration))
+    kept = [(round(a, 3), round(b, 3)) for a, b in kept if b - a >= 0.15]
+    removed = duration - sum(b - a for a, b in kept)
+    if not kept or removed < 0.3:
+        return video_path, full
+
+    selector = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in kept)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(video_path),
+        "-vf", f"select='{selector}',setpts=N/FRAME_RATE/TB",
+        "-af", f"aselect='{selector}',asetpts=N/SR/TB",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", str(output_path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=max(300, int(duration * 6)))
+    if res.returncode != 0 or not is_valid_mp4(output_path):
+        logger.warning(f"Silence removal failed, keeping the original clip: {res.stderr[:200]}")
+        return video_path, full
+    logger.info(f"Silence removal: cut {removed:.1f}s across {len(kept) - 1} gaps.")
+    return str(output_path), kept
+
+
+def track_face_path(
+    video_path: str,
+    sample_step: float = 0.33,
+    crop_width_ratio: Optional[float] = None,
+    deadzone: float = 0.12,
+    smooth: float = 0.30,
+    jitter: float = 0.004,
+    snap_jump: float = 0.25,
+) -> Optional[List[Tuple[float, float]]]:
+    """Follow the main speaker's face through a clip and return a smoothed camera path.
+
+    Samples a frame every `sample_step` seconds, detects faces with YuNet and keeps the face that
+    best continues the previous position (so the camera does not hop between people). The raw
+    positions then drive a virtual camera:
+      - deadzone: the camera only moves once the face leaves a central band of the crop
+        (`deadzone` x crop width), so small head movements do not cause drifting;
+      - smooth: exponential easing toward the target each sample (higher = snappier);
+      - jitter: changes smaller than this (fraction of frame width) are ignored;
+      - snap_jump: jumps larger than this (scene cut / other speaker) cut instantly.
+
+    Returns [(t_seconds, cx_ratio), ...] simplified to the points needed for a smooth
+    piecewise-linear path, or None when no face was found or the model is unavailable.
+    """
+    model = next((p for p in [YUNET_MODEL_PATH, BASE_DIR / "face_detection_yunet.onnx"] if p.exists()), None)
+    if model is None or not os.path.exists(video_path):
+        return None
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        if fps <= 1 or fps != fps:
+            fps = 30.0
+        src_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
+        src_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+        if not src_w or not src_h:
+            cap.release()
+            return None
+        if crop_width_ratio is None:
+            crop_width_ratio = min(1.0, (src_h * 9.0 / 16.0) / src_w)
+        scale = min(1.0, 640.0 / src_w)
+        det_w, det_h = max(32, int(src_w * scale)), max(32, int(src_h * scale))
+        detector = cv2.FaceDetectorYN.create(str(model), "", (det_w, det_h), 0.6, 0.3, 50)
+
+        step_frames = max(1, int(round(sample_step * fps)))
+        raw: List[Tuple[float, Optional[float]]] = []
+        prev_cx: Optional[float] = None
+        frame_idx = 0
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            if frame_idx % step_frames == 0:
+                ok, frame = cap.retrieve()
+                if not ok or frame is None:
+                    break
+                small = cv2.resize(frame, (det_w, det_h)) if scale < 1.0 else frame
+                _, faces = detector.detect(small)
+                chosen = None
+                if faces is not None and len(faces):
+                    candidates = []
+                    for f in faces:
+                        x, y, w, h = (float(v) for v in f[:4])
+                        if w / det_w < 0.025:
+                            continue
+                        candidates.append(((x + w / 2.0) / det_w, w * h))
+                    if candidates:
+                        largest = max(c[1] for c in candidates)
+                        if prev_cx is None:
+                            chosen = max(candidates, key=lambda c: c[1])[0]
+                        else:
+                            # Prefer continuity, unless the nearby face is much smaller than the main one.
+                            def continuity(c):
+                                return c[1] * (1.0 - min(0.9, abs(c[0] - prev_cx) * 2.0))
+                            best = max(candidates, key=continuity)
+                            chosen = best[0] if best[1] >= 0.3 * largest else max(candidates, key=lambda c: c[1])[0]
+                if chosen is not None:
+                    prev_cx = chosen
+                raw.append((frame_idx / fps, chosen))
+            frame_idx += 1
+        cap.release()
+    except Exception as e:
+        logger.warning(f"Dynamic face tracking failed, using a static crop instead: {e}")
+        return None
+
+    if not raw or all(cx is None for _, cx in raw):
+        return None
+
+    # Hold the last known position through frames where no face was detected.
+    first_known = next(cx for _, cx in raw if cx is not None)
+    filled, last = [], first_known
+    for t, cx in raw:
+        last = cx if cx is not None else last
+        filled.append((t, last))
+
+    # Virtual camera: deadzone + exponential smoothing + jitter filter + snap on big jumps.
+    band = deadzone * crop_width_ratio
+    cam = filled[0][1]
+    path = [(0.0, cam)]
+    for t, target in filled[1:]:
+        offset = target - cam
+        if abs(offset) > snap_jump:
+            cam = target
+        elif abs(offset) > band:
+            cam += (offset - band * (1 if offset > 0 else -1)) * smooth
+        if abs(cam - path[-1][1]) >= jitter:
+            path.append((t, cam))
+    if path[-1][0] < filled[-1][0]:
+        path.append((filled[-1][0], cam))
+
+    # Keep the expression small: drop points that a straight line through their neighbours explains.
+    simplified = [path[0]]
+    for i in range(1, len(path) - 1):
+        (t0, v0), (t1, v1), (t2, v2) = simplified[-1], path[i], path[i + 1]
+        expected = v0 + (v2 - v0) * ((t1 - t0) / (t2 - t0)) if t2 > t0 else v1
+        if abs(expected - v1) > 0.003:
+            simplified.append(path[i])
+    simplified.append(path[-1])
+    while len(simplified) > 80:
+        simplified = simplified[::2] + ([simplified[-1]] if simplified[-1] != simplified[::2][-1] else [])
+    return [(round(t, 3), round(v, 4)) for t, v in simplified]
+
+
+def piecewise_linear_expr(points: List[Tuple[float, float]], var: str = "t") -> str:
+    """FFmpeg expression over `t` that linearly interpolates between (t, value) keyframes.
+
+    Values are held constant before the first and after the last keyframe. Commas are left
+    unescaped, so the result must be used inside a single-quoted filter option.
+    """
+    if not points:
+        return "0"
+    if len(points) == 1:
+        return f"{points[0][1]:.4f}"
+    expr = f"{points[-1][1]:.4f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(points[:-1], points[1:]))):
+        span = max(0.001, t1 - t0)
+        segment = f"{v0:.4f}+({v1 - v0:.4f})*({var}-{t0:.3f})/{span:.3f}"
+        expr = f"if(lt({var},{t1:.3f}),{segment},{expr})"
+    return f"if(lt({var},{points[0][0]:.3f}),{points[0][1]:.4f},{expr})"
+
+
 def detect_speaker_center_ratio(video_path: str, facecam_position: str = "auto", streamer_preset: str = "none") -> float:
     """
     Detects speaker faces across sample frames and returns the smoothed horizontal center ratio (0.0 to 1.0).
@@ -2785,7 +3095,9 @@ def build_ffmpeg_filtergraph(
     title_position: str = "auto",
     ass_subtitles_path: Optional[str] = None,
     face_box: Optional[Dict[str, Any]] = None,
-    title_y_percent: Optional[float] = None
+    title_y_percent: Optional[float] = None,
+    zoom_points: Optional[List[Tuple[float, float]]] = None,
+    fps: float = 30.0,
 ) -> Tuple[str, str]:
     """
     Constructs the FFmpeg -filter_complex chain with proper aspect ratio center-cropping.
@@ -2795,6 +3107,14 @@ def build_ffmpeg_filtergraph(
 
     face_cx = float(face_box.get("cx", face_center_ratio)) if face_box else face_center_ratio
     face_cy = float(face_box.get("cy", 0.78 if streamer_preset in ["split_top_cam", "pip_corner"] else 0.35)) if face_box else 0.35
+    # Optional moving camera path [(t, cx), ...] from track_face_path (single-speaker layouts only)
+    cx_track = face_box.get("cx_track") if face_box else None
+
+    def moving_cx(lo: float, hi: float) -> Optional[str]:
+        """Time-varying horizontal centre (clamped to [lo, hi]) or None when there is no track."""
+        if not cx_track:
+            return None
+        return piecewise_linear_expr([(t, max(lo, min(hi, v))) for t, v in cx_track])
 
     # 1. Base Layout & Scaling
     if streamer_preset == "split_top_cam":
@@ -2980,9 +3300,15 @@ def build_ffmpeg_filtergraph(
             safe_cx = 0.50
         safe_cx = max(0.22, min(0.78, safe_cx))
         crop_ratio_safe = max(0.0, min(1.0, (safe_cx - 0.158) / 0.684))
-        filters.append(
-            f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)*{crop_ratio_safe:.3f}:0,scale=1080:1920[layout_base]"
-        )
+        dyn_cx = moving_cx(0.0, 1.0)
+        if dyn_cx:
+            filters.append(
+                f"[0:v]crop='min(iw,ih*9/16)':ih:'max(0,min(iw-ow,iw*({dyn_cx})-ow/2))':0,scale=1080:1920[layout_base]"
+            )
+        else:
+            filters.append(
+                f"[0:v]crop=ih*9/16:ih:(iw-ih*9/16)*{crop_ratio_safe:.3f}:0,scale=1080:1920[layout_base]"
+            )
         current_v = "[layout_base]"
 
     elif aspect_ratio == "1:1":
@@ -2991,7 +3317,8 @@ def build_ffmpeg_filtergraph(
         if 0.46 <= safe_cx <= 0.54:
             safe_cx = 0.50
         safe_cx = max(0.15, min(0.85, safe_cx))
-        crop_11 = f"crop='min(iw,ih)':'min(iw,ih)':'max(0,min(iw-ih,iw*{safe_cx:.3f}-ih/2))':'(ih-min(iw,ih))/2',scale=1080:1080"
+        cx_term = moving_cx(0.0, 1.0) or f"{safe_cx:.3f}"
+        crop_11 = f"crop='min(iw,ih)':'min(iw,ih)':'max(0,min(iw-ih,iw*({cx_term})-ih/2))':'(ih-min(iw,ih))/2',scale=1080:1080"
         if background_style == "blurred":
             filters.append(
                 f"[0:v]split=2[bg_raw][fg_raw];"
@@ -3011,7 +3338,8 @@ def build_ffmpeg_filtergraph(
         if 0.46 <= safe_cx <= 0.54:
             safe_cx = 0.50
         safe_cx = max(0.15, min(0.85, safe_cx))
-        crop_43 = f"crop='min(iw,ih*4/3)':'min(ih,iw*3/4)':'max(0,min(iw-ih*4/3,iw*{safe_cx:.3f}-(ih*4/3)/2))':'(ih-min(ih,iw*3/4))/2',scale=1080:810"
+        cx_term = moving_cx(0.0, 1.0) or f"{safe_cx:.3f}"
+        crop_43 = f"crop='min(iw,ih*4/3)':'min(ih,iw*3/4)':'max(0,min(iw-ih*4/3,iw*({cx_term})-(ih*4/3)/2))':'(ih-min(ih,iw*3/4))/2',scale=1080:810"
         if background_style == "blurred":
             filters.append(
                 f"[0:v]split=2[bg_raw][fg_raw];"
@@ -3031,7 +3359,8 @@ def build_ffmpeg_filtergraph(
         if 0.46 <= safe_cx <= 0.54:
             safe_cx = 0.50
         safe_cx = max(0.15, min(0.85, safe_cx))
-        crop_169_land = f"crop='min(iw,ih*16/9)':'min(ih,iw*9/16)':'max(0,min(iw-ih*16/9,iw*{safe_cx:.3f}-(ih*16/9)/2))':'(ih-min(ih,iw*9/16))/2',scale=1920:1080"
+        cx_term = moving_cx(0.0, 1.0) or f"{safe_cx:.3f}"
+        crop_169_land = f"crop='min(iw,ih*16/9)':'min(ih,iw*9/16)':'max(0,min(iw-ih*16/9,iw*({cx_term})-(ih*16/9)/2))':'(ih-min(ih,iw*9/16))/2',scale=1920:1080"
         filters.append(
             f"[0:v]{crop_169_land}[layout_base]"
         )
@@ -3043,7 +3372,8 @@ def build_ffmpeg_filtergraph(
         if 0.46 <= safe_cx <= 0.54:
             safe_cx = 0.50
         safe_cx = max(0.15, min(0.85, safe_cx))
-        crop_169 = f"crop='min(iw,ih*16/9)':'min(ih,iw*9/16)':'max(0,min(iw-ih*16/9,iw*{safe_cx:.3f}-(ih*16/9)/2))':'(ih-min(ih,iw*9/16))/2',scale=1080:608"
+        cx_term = moving_cx(0.0, 1.0) or f"{safe_cx:.3f}"
+        crop_169 = f"crop='min(iw,ih*16/9)':'min(ih,iw*9/16)':'max(0,min(iw-ih*16/9,iw*({cx_term})-(ih*16/9)/2))':'(ih-min(ih,iw*9/16))/2',scale=1080:608"
         if background_style == "blurred":
             filters.append(
                 f"[0:v]split=2[bg_raw][fg_raw];"
@@ -3056,6 +3386,17 @@ def build_ffmpeg_filtergraph(
                 f"[0:v]{crop_169},pad=1080:1920:0:656:black[layout_base]"
             )
         current_v = "[layout_base]"
+
+    # 1b. Punch-in zoom on the picture only (before captions/titles, so text never gets cropped).
+    # Limited to full-bleed layouts; letterboxed layouts would zoom their black bars too.
+    if zoom_points and len(zoom_points) > 1 and streamer_preset == "none" and aspect_ratio in ("9:16", "16:9_landscape"):
+        out_w, out_h = (1920, 1080) if aspect_ratio == "16:9_landscape" else (1080, 1920)
+        z_expr = piecewise_linear_expr(zoom_points, var="in_time")
+        filters.append(
+            f"{current_v}zoompan=z='{z_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d=1:s={out_w}x{out_h}:fps={fps:.3f}[zoomed]"
+        )
+        current_v = "[zoomed]"
 
     # 2. Subtitles & Title Burning via libass (.ass)
     # (If ass_subtitles_path is provided, it contains BOTH the title and subtitles rendered with exact matching fonts)
@@ -3139,6 +3480,8 @@ def render_clip_to_mp4(
     bgm_path: Optional[str] = None,
     bgm_volume: float = 0.25,
     bgm_start_offset: float = 0.0,
+    # Duck the music under speech (sidechain compression keyed on the original audio)
+    bgm_ducking: bool = False,
     # Hook SFX options (plays at frame 0)
     hook_sfx_enabled: bool = False,
     hook_sfx_path: Optional[str] = None,
@@ -3147,7 +3490,11 @@ def render_clip_to_mp4(
     original_audio_volume: float = 1.0,
     # Hardware acceleration selection ('auto', 'nvenc', 'amf', 'qsv', 'cpu')
     hardware_accel: Optional[str] = "auto",
-    title_y_percent: Optional[float] = None
+    title_y_percent: Optional[float] = None,
+    # Follow the speaker through the clip instead of one fixed crop position
+    dynamic_tracking: bool = False,
+    # Punch-in zoom keyframes [(t, zoom), ...] (see zoom_keyframes)
+    zoom_points: Optional[List[Tuple[float, float]]] = None,
 ) -> str:
     """
     Renders the final 1080x1920 short-form video with layout, aspect ratio, titles, subtitles,
@@ -3181,6 +3528,13 @@ def render_clip_to_mp4(
             streamer_preset=streamer_preset
         )
 
+    if enable_face_tracking and dynamic_tracking and not is_streamer and (facecam_position or "auto") == "auto":
+        crop_ratio = {"9:16": None, "1:1": 0.5625, "4:3": 0.75}.get(aspect_ratio)
+        cx_track = track_face_path(video_path, crop_width_ratio=crop_ratio)
+        if cx_track and len(cx_track) > 1:
+            face_box = {**face_box, "cx_track": cx_track}
+            logger.info(f"Dynamic face tracking: camera path with {len(cx_track)} keyframes.")
+
     filter_complex, out_video_map = build_ffmpeg_filtergraph(
         aspect_ratio=aspect_ratio,
         background_style=background_style,
@@ -3190,7 +3544,9 @@ def render_clip_to_mp4(
         title_position=title_position,
         ass_subtitles_path=ass_subtitles_path,
         face_box=face_box,
-        title_y_percent=title_y_percent
+        title_y_percent=title_y_percent,
+        zoom_points=zoom_points,
+        fps=float((get_video_file_metadata(video_path) or {}).get("fps") or 30.0) if zoom_points else 30.0,
     )
 
     filter_chains = [filter_complex]
@@ -3313,9 +3669,22 @@ def render_clip_to_mp4(
         vol = max(0.0, min(1.0, float(bgm_volume)))
         fade_st = max(0.0, dur - 1.5)
         filter_chains.append(
-            f"[{bgm_idx}:a]asetpts=PTS-STARTPTS,volume={vol:.3f},afade=t=out:st={fade_st:.2f}:d=1.5[bgm_proc]"
+            f"[{bgm_idx}:a]asetpts=PTS-STARTPTS,volume={vol:.3f},afade=t=out:st={fade_st:.2f}:d=1.5,"
+            f"aformat=sample_rates=48000:channel_layouts=stereo[bgm_proc]"
         )
-        audio_inputs_to_mix.append("[bgm_proc]")
+        if bgm_ducking and audio_inputs_to_mix:
+            # Split the voice track: one copy goes to the mix, the other keys the compressor on the music.
+            voice = audio_inputs_to_mix[0]
+            filter_chains.append(
+                f"{voice}aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice_mix][voice_key]"
+            )
+            filter_chains.append(
+                "[bgm_proc][voice_key]sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400:makeup=1[bgm_ducked]"
+            )
+            audio_inputs_to_mix[0] = "[voice_mix]"
+            audio_inputs_to_mix.append("[bgm_ducked]")
+        else:
+            audio_inputs_to_mix.append("[bgm_proc]")
 
     # Hook SFX input placed at the very first frame (t=0)
     if hook_sfx_enabled and hook_sfx_path and os.path.exists(hook_sfx_path):
@@ -3446,6 +3815,190 @@ def render_clip_to_mp4(
             raise RuntimeError(f"FFmpeg rendering failed: {err_text}")
 
     return str(output_mp4_path)
+
+
+def zoom_keyframes(
+    words: Optional[List[Dict[str, Any]]],
+    duration: float,
+    zoom: float = 1.10,
+    min_gap: float = 0.6,
+    fallback_every: float = 4.0,
+    ease: float = 0.2,
+) -> List[Tuple[float, float]]:
+    """Punch-in pattern: the zoom alternates between 1.0 and `zoom` at every sentence start.
+
+    Sentence starts are words that follow a pause of at least `min_gap` seconds or a word ending in
+    . ? !. Without word timings the zoom flips every `fallback_every` seconds. Each change eases in
+    over `ease` seconds so it reads as a quick cut-in rather than a slow drift.
+    """
+    starts: List[float] = []
+    if words:
+        prev_end, prev_text = None, ""
+        for w in words:
+            st = float(w.get("start", 0.0))
+            if prev_end is not None and (st - prev_end >= min_gap or prev_text.rstrip().endswith((".", "?", "!"))):
+                starts.append(st)
+            prev_end, prev_text = float(w.get("end", st)), str(w.get("word", ""))
+    if not starts:
+        t = fallback_every
+        while t < duration - 1.0:
+            starts.append(t)
+            t += fallback_every
+    points = [(0.0, 1.0)]
+    level = 1.0
+    for st in starts:
+        if st - points[-1][0] < 1.0 or st > duration - 0.5:
+            continue
+        new_level = zoom if level == 1.0 else 1.0
+        points.append((st, level))
+        points.append((st + ease, new_level))
+        level = new_level
+    return points
+
+
+def prepend_teaser(
+    rendered_path: str,
+    output_path: str,
+    teaser_start: float,
+    teaser_duration: float = 3.0,
+    transition: float = 0.25,
+) -> str:
+    """Open the clip with `teaser_duration` seconds of its strongest moment, then a white flash into the full clip.
+
+    The teaser is taken from the finished render (so it already has the crop, captions and title)
+    and slightly darkened with a vignette so it reads as a preview.
+    """
+    meta = get_video_file_metadata(rendered_path) or {}
+    duration = float(meta.get("duration") or 0.0)
+    fps = float(meta.get("fps") or 30.0)
+    if duration < teaser_duration + 3.0:
+        return rendered_path
+    start = max(0.0, min(teaser_start, duration - teaser_duration))
+    offset = teaser_duration - transition
+    has_audio = check_has_audio(rendered_path)
+    vf = (
+        f"[0:v]trim=start={start:.3f}:duration={teaser_duration:.3f},setpts=PTS-STARTPTS,fps={fps:.3f},"
+        f"eq=brightness=-0.05:saturation=1.15,vignette=PI/5,format=yuv420p[tv];"
+        f"[1:v]setpts=PTS-STARTPTS,fps={fps:.3f},format=yuv420p[mv];"
+        f"[tv][mv]xfade=transition=fadewhite:duration={transition:.2f}:offset={offset:.3f}[v]"
+    )
+    maps = ["-map", "[v]"]
+    if has_audio:
+        vf += (
+            f";[0:a]atrim=start={start:.3f}:duration={teaser_duration:.3f},asetpts=PTS-STARTPTS[ta];"
+            f"[1:a]asetpts=PTS-STARTPTS[ma];[ta][ma]acrossfade=d={transition:.2f}[a]"
+        )
+        maps += ["-map", "[a]"]
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(rendered_path), "-i", str(rendered_path),
+        "-filter_complex", vf, *maps,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output_path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=max(300, int(duration * 8)))
+    if res.returncode != 0 or not is_valid_mp4(output_path):
+        logger.warning(f"Teaser intro failed, keeping the clip without it: {res.stderr[:200]}")
+        return rendered_path
+    return str(output_path)
+
+
+def validate_render(path: str, expected_duration: float, expect_audio: bool = True) -> None:
+    """Refuse to report success for a broken render: missing/empty file, no video, lost audio or truncated."""
+    if not path or not os.path.exists(path) or os.path.getsize(path) < 1000:
+        raise RuntimeError("Rendered file is missing or empty.")
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        info = json.loads(probe.stdout or "{}")
+    except Exception as e:
+        raise RuntimeError(f"Rendered file could not be read: {e}")
+    kinds = {st.get("codec_type") for st in info.get("streams", [])}
+    if "video" not in kinds:
+        raise RuntimeError("Rendered file has no video track.")
+    if expect_audio and "audio" not in kinds:
+        raise RuntimeError("Rendered file lost its audio track.")
+    duration = float((info.get("format") or {}).get("duration") or 0.0)
+    if duration < 0.5 or (expected_duration > 2.0 and duration < expected_duration * 0.5):
+        raise RuntimeError(f"Rendered file is truncated ({duration:.1f}s of ~{expected_duration:.1f}s).")
+
+
+def make_thumbnail(
+    video_path: str,
+    output_jpg: str,
+    title: Optional[str],
+    at_time: float = 1.0,
+    size: Tuple[int, int] = (1080, 1920),
+) -> Optional[str]:
+    """Cover image: a clean source frame (no burned-in captions) cropped to `size` around the speaker's
+    face, with a dark bottom gradient and the title in large type."""
+    frame_png = f"{output_jpg}.frame.png"
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, at_time):.2f}",
+             "-i", str(video_path), "-frames:v", "1", frame_png],
+            capture_output=True, text=True, timeout=60,
+        )
+        if res.returncode != 0 or not os.path.exists(frame_png):
+            return None
+        img = Image.open(frame_png).convert("RGB")
+        target_w, target_h = size
+        src_w, src_h = img.size
+        # Crop to the target aspect ratio, centred horizontally on the detected face
+        if src_w / src_h > target_w / target_h:
+            crop_w = int(src_h * target_w / target_h)
+            face = detect_speaker_face_box(frame_png) or {}
+            cx = float(face.get("cx", 0.5)) if face.get("found") else 0.5
+            left = int(max(0, min(src_w - crop_w, cx * src_w - crop_w / 2)))
+            img = img.crop((left, 0, left + crop_w, src_h))
+        else:
+            crop_h = int(src_w * target_h / target_w)
+            top = int(max(0, (src_h - crop_h) / 2))
+            img = img.crop((0, top, src_w, top + crop_h))
+        img = img.resize((target_w, target_h), Image.LANCZOS)
+        w, h = img.size
+        shade = Image.new("L", (1, h))
+        for y in range(h):
+            # Transparent top half, darkening to ~85% at the bottom edge
+            shade.putpixel((0, y), int(max(0.0, (y / h - 0.45) / 0.55) * 215))
+        black = Image.new("RGB", (w, h), (0, 0, 0))
+        img = Image.composite(black, img, shade.resize((w, h)))
+        text = (title or "").strip().upper()
+        if text:
+            draw = ImageDraw.Draw(img)
+            font_size = max(28, int(w * 0.085))
+            font = get_font("Anton", font_size)
+            lines, line = [], ""
+            for word in text.split():
+                trial = f"{line} {word}".strip()
+                if draw.textlength(trial, font=font) <= w * 0.86 or not line:
+                    line = trial
+                else:
+                    lines.append(line)
+                    line = word
+            if line:
+                lines.append(line)
+            lines = lines[:4]
+            line_h = int(font_size * 1.12)
+            y = int(h * 0.92) - line_h * len(lines)
+            for ln in lines:
+                tw = draw.textlength(ln, font=font)
+                draw.text(((w - tw) / 2, y), ln, font=font, fill=(255, 255, 255),
+                          stroke_width=max(2, font_size // 18), stroke_fill=(0, 0, 0))
+                y += line_h
+        img.save(output_jpg, "JPEG", quality=90)
+        return str(output_jpg)
+    except Exception as e:
+        logger.warning(f"Thumbnail generation failed: {e}")
+        return None
+    finally:
+        if os.path.exists(frame_png):
+            try:
+                os.unlink(frame_png)
+            except Exception:
+                pass
 
 
 def extract_clip_frame(video_url: str, video_id: str, timestamp: float = 0.0, cookies_content: Optional[str] = None) -> Optional[str]:

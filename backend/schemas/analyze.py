@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 class ViralClip(BaseModel):
@@ -12,6 +12,9 @@ class ViralClip(BaseModel):
     title_suggestion: str = Field(default="", description="Catchy alternative title suggestion. MUST NEVER use first-person pronouns ('I', 'me', 'my'). Attribute to speaker or objective topic.")
     caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion attributing quotes or insights to the speaker.")
     hashtag_suggestion: str = Field(default="", description="Relevant hashtags suggestion (e.g. #hashtag1 #hashtag2)")
+    # Per-dimension quality scores (1-10): hook, flow, value, trend, shareability
+    scores: Optional[Dict[str, int]] = None
+    score_reason: str = ""
 
 class ViralClipGemini(BaseModel):
     title: str = Field(description="Catchy clip title, max 8 words, in the EXACT SAME LANGUAGE as the video transcript (STRICT ZERO-TRANSLATION RULE: English is English, Indonesian is Indonesian, Spanish is Spanish). NEVER use first-person pronouns ('I', 'me', 'my', 'myself', 'aku', 'saya'). Attribute to the person speaking by name, host/guest title, or use third-person objective framing so it does not look like the user's opinion.")
@@ -23,6 +26,12 @@ class ViralClipGemini(BaseModel):
     title_suggestion: str = Field(default="", description="Catchy alternative title suggestion in the EXACT SAME LANGUAGE as the video transcript (DO NOT translate). STRICT RULE: NEVER use first-person ('I', 'me', 'my', 'saya', 'aku'). Attribute to the speaker/host/guest by name or topic.")
     caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion written in the EXACT SAME LANGUAGE as the video transcript (DO NOT translate to any other language), attributing insights or story to the speaker.")
     hashtag_suggestion: str = Field(default="", description="Relevant hashtags suggestion in the SAME LANGUAGE as the video transcript (e.g. #hashtag1 #hashtag2)")
+    score_hook: int = Field(description="1-10: how strongly the first 3 seconds stop the scroll")
+    score_flow: int = Field(description="1-10: whether the clip stands alone with a clear beginning, middle and end")
+    score_value: int = Field(description="1-10: insight, emotion, humor or usefulness the viewer gets")
+    score_trend: int = Field(description="1-10: fit with what currently performs on TikTok, Reels and Shorts")
+    score_shareability: int = Field(description="1-10: would a viewer quote, screenshot or send this to a friend")
+    score_reason: str = Field(description="One short sentence (same language as the transcript) explaining the strongest and weakest dimension")
 
 class VideoAnalysis(BaseModel):
     summary: str = Field(description="1-2 sentence video summary in the EXACT SAME LANGUAGE as the video transcript (STRICT ZERO-TRANSLATION RULE: English stays English, Indonesian stays Indonesian, Spanish stays Spanish), followed by 2-4 relevant hashtags")
@@ -56,6 +65,8 @@ class TranscriptLine(BaseModel):
     end: float
     text: str
     engagement: Optional[float] = None
+    # Per-word timings from YouTube auto-captions (json3), when available
+    words: Optional[List[Dict[str, Any]]] = None
 
 class AnalyzeResponse(BaseModel):
     video_id: str

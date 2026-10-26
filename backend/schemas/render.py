@@ -49,6 +49,16 @@ class RenderSettingsModel(BaseModel):
     watermark_x: Optional[float] = 90.0
     watermark_y: Optional[float] = 8.0
     hardware_accel: Optional[str] = "auto"
+    # Smart editing
+    bgm_ducking: Optional[bool] = True               # lower the music while someone speaks
+    dynamic_tracking: Optional[bool] = True          # follow the speaker's face through the clip
+    remove_silence: Optional[bool] = False           # cut silent gaps inside the clip
+    silence_min_duration: Optional[float] = 0.6      # seconds of silence before a gap is cut
+    teaser_hook: Optional[bool] = False              # open with a short teaser of the hook moment
+    teaser_duration: Optional[float] = 3.0
+    auto_zoom: Optional[bool] = False                # alternate subtle punch-in zooms per sentence
+    generate_thumbnail: Optional[bool] = True        # export a JPG cover with the clip title
+    caption_timing: Optional[str] = "auto"           # "auto" = YouTube caption word timings when available, "whisper" = always Whisper
     # Multi-Segment Merged Highlight Video
     render_mode: Optional[str] = "separate"  # "separate" | "merged"
     compilation_title: Optional[str] = None

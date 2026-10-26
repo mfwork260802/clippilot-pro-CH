@@ -36,6 +36,27 @@ from backend.utils.text import (
 )
 
 
+def json3_event_words(segs: list, event_start: float, event_end: float) -> List[dict]:
+    """Word timings from one YouTube json3 caption event.
+
+    Auto-generated (ASR) captions split an event into per-word `segs` with `tOffsetMs`; each word
+    lasts until the next one starts (the last until the event ends). Manual captions have a single
+    seg per event, so they yield no word timings and callers fall back to Whisper.
+    """
+    timed = [
+        (event_start + seg.get('tOffsetMs', 0) / 1000.0, seg.get('utf8', '').strip())
+        for seg in segs
+        if seg.get('utf8', '').strip()
+    ]
+    if len(timed) < 2 or not any('tOffsetMs' in seg for seg in segs):
+        return []
+    words = []
+    for i, (w_start, word) in enumerate(timed):
+        w_end = timed[i + 1][0] if i + 1 < len(timed) else max(event_end, w_start + 0.2)
+        words.append({'word': word, 'start': round(w_start, 3), 'end': round(max(w_end, w_start + 0.08), 3)})
+    return words
+
+
 def normalize_transcript(fetched_data) -> List[dict]:
     """Normalizes FetchedTranscript objects (using JSONFormatter or to_raw_data()),
     raw JSON strings, or dict lists into standard timestamped segment dictionaries.
@@ -78,11 +99,14 @@ def normalize_transcript(fetched_data) -> List[dict]:
             dur = float(getattr(item, "duration", 0.0))
 
         if text:
-            results.append({
+            entry = {
                 "text": text,
                 "start": round(start, 2),
                 "duration": max(0.1, round(dur, 2))
-            })
+            }
+            if isinstance(item, dict) and item.get("words"):
+                entry["words"] = item["words"]
+            results.append(entry)
 
     return results
 
@@ -608,7 +632,11 @@ def fetch_transcript_ytdlp(
                                             if text:
                                                 start = ev.get('tStartMs', 0) / 1000.0
                                                 dur = ev.get('dDurationMs', 0) / 1000.0
-                                                result.append({'text': text, 'start': start, 'duration': dur})
+                                                line = {'text': text, 'start': start, 'duration': dur}
+                                                words = json3_event_words(segs, start, start + dur)
+                                                if words:
+                                                    line['words'] = words
+                                                result.append(line)
                                         if result:
                                             check = validate_transcript_language(result, expected_video_lang=expected_language)
                                             if not check['is_supported'] or check['mismatch_detected']:

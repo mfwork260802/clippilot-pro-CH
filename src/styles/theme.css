@@ -391,3 +391,20 @@ select option { background: #0b1120; }
 }
 .studio-tab-preview-title { text-transform: none !important; letter-spacing: 0 !important; color: var(--blue-2) !important; }
 .studio-main-heading, .studio-main-heading * { text-transform: none !important; letter-spacing: -0.025em !important; }
+
+/* ---------- Per-dimension AI scores on clip cards ---------- */
+.clip-score-grid {
+  display: grid;
+  gap: 6px;
+  margin: 0.75rem 0;
+  padding: 0.75rem 0.9rem;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: rgba(61, 123, 255, 0.05);
+}
+.clip-score-row { display: grid; grid-template-columns: 84px 1fr 22px; align-items: center; gap: 10px; font-size: 0.78rem; }
+.clip-score-label { color: var(--text-secondary); }
+.clip-score-track { height: 5px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.clip-score-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue-deep), var(--blue), var(--blue-2)); }
+.clip-score-value { font-family: var(--font-code); color: #eef2ff; text-align: right; }
+.clip-score-reason { margin: 4px 0 0; color: var(--text-muted); font-size: 0.78rem; line-height: 1.45; }

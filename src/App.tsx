@@ -707,6 +707,18 @@ export default function App() {
             // Multi-Segment Merged Highlight Video
             render_mode: settings.renderMode || 'separate',
             compilation_title: settings.compilationTitle || null,
+            // Smart editing
+            ...(settings.smartEditing ? {
+              dynamic_tracking: settings.smartEditing.dynamicTracking,
+              bgm_ducking: settings.smartEditing.bgmDucking,
+              remove_silence: settings.smartEditing.removeSilence,
+              silence_min_duration: settings.smartEditing.silenceMinDuration,
+              teaser_hook: settings.smartEditing.teaserHook,
+              teaser_duration: settings.smartEditing.teaserDuration,
+              auto_zoom: settings.smartEditing.autoZoom,
+              generate_thumbnail: settings.smartEditing.generateThumbnail,
+              caption_timing: settings.smartEditing.captionTiming,
+            } : {}),
           },
           transcript: result.transcript,
         }),
@@ -5670,6 +5682,24 @@ Transcript:
                                   {clip.key_quotes.map((quote, qIdx) => (
                                     <div key={qIdx} className="quote-item">"{quote}"</div>
                                   ))}
+                                </div>
+                              )}
+
+                              {/* Per-dimension AI scores */}
+                              {clip.scores && Object.keys(clip.scores).length > 0 && (
+                                <div className="clip-score-grid" onClick={(e) => e.stopPropagation()}>
+                                  {(['hook', 'flow', 'value', 'trend', 'shareability'] as const).map(dim => {
+                                    const value = clip.scores?.[dim];
+                                    if (value === undefined) return null;
+                                    return (
+                                      <div key={dim} className="clip-score-row">
+                                        <span className="clip-score-label">{t.results.scoreLabels[dim]}</span>
+                                        <span className="clip-score-track"><span style={{ width: `${value * 10}%` }} /></span>
+                                        <span className="clip-score-value">{value}</span>
+                                      </div>
+                                    );
+                                  })}
+                                  {clip.score_reason && <p className="clip-score-reason">{clip.score_reason}</p>}
                                 </div>
                               )}
 

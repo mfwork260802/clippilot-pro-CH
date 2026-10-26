@@ -13,9 +13,10 @@ yt-dlp[default,deno]>=2026.0.0
 youtube-transcript-api>=1.2.0
 requests>=2.31.0
 
-# Whisper AI Transcription & Audio Processing
-torch>=2.0.0
-openai-whisper>=20231117
+# Whisper transcription (faster-whisper / CTranslate2, int8 on CPU; no PyTorch needed)
+faster-whisper>=1.1.0
+# faster-whisper still passes `metadata_errors` to av.open, which PyAV 16 removed
+av>=12,<16
 numpy>=1.24.0
 tqdm>=4.65.0
 

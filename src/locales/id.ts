@@ -169,6 +169,7 @@ export const id: Translations = {
     reconstructingTimestamps: "Menyusun ulang timestamp interaksi dari hasil analisis tersimpan...",
   },
   results: {
+    scoreLabels: { hook: "Hook", flow: "Alur", value: "Nilai", trend: "Tren", shareability: "Layak share" },
     refreshPlayer: "Muat ulang pemutar",
     downloadRawVideo: "Unduh video lengkap",
     downloadingRawVideo: "Mengunduh video lengkap...",

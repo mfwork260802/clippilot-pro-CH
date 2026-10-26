@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, HTTPException, Header
 from fastapi.responses import StreamingResponse
@@ -55,6 +55,7 @@ from backend.services.youtube_service import (
 from backend.utils.heatmap import get_average_heatmap_value
 from backend.utils.proxy import get_proxy_url
 from backend.utils.sse import _sse, with_heartbeat
+from backend.utils.clip_timing import snap_to_sentence_boundaries
 from backend.utils.text import (
     detect_transcript_language,
     validate_transcript_language,
@@ -83,6 +84,8 @@ def _format_parsed_dict(data: dict, channel: str, lang_code: str) -> dict:
             "title_suggestion": title_sug,
             "caption_suggestion": str(c.get('caption_suggestion', '') or ''),
             "hashtag_suggestion": str(c.get('hashtag_suggestion', '') or ''),
+            "scores": extract_dimension_scores(c),
+            "score_reason": str(c.get('score_reason', '') or ''),
         })
     return {
         "summary": str(data.get("summary", "") or ""),
@@ -181,6 +184,25 @@ def parse_lenient_json_analysis(raw_text: str, channel: str = "", lang_code: str
 
 
 router = APIRouter(tags=["Analyze"])
+
+SCORE_DIMENSIONS = ("hook", "flow", "value", "trend", "shareability")
+
+
+def extract_dimension_scores(source: Any) -> dict:
+    """Collect score_<dimension> fields (1-10) from a dict or model; empty when the AI gave none."""
+    getter = source.get if isinstance(source, dict) else (lambda k, d=None: getattr(source, k, d))
+    scores = {}
+    for dim in SCORE_DIMENSIONS:
+        raw = getter(f"score_{dim}")
+        if raw is None and isinstance(source, dict) and isinstance(source.get("scores"), dict):
+            raw = source["scores"].get(dim)
+        try:
+            value = int(round(float(raw)))
+        except (TypeError, ValueError):
+            continue
+        scores[dim] = max(1, min(10, value))
+    return scores
+
 
 
 @router.get("/api/health")
@@ -945,12 +967,15 @@ async def analyze_video(request: AnalyzeRequest):
             ld   = line.get("duration", 0.0)
             le   = ls + ld
             score = get_average_heatmap_value(ls, le, heatmap)
-            enriched_transcript.append({
+            enriched_line = {
                 "start":      round(ls, 2),
                 "end":        round(le, 2),
                 "text":       line.get("text", ""),
                 "engagement": round(score, 3)
-            })
+            }
+            if line.get("words"):
+                enriched_line["words"] = line["words"]
+            enriched_transcript.append(enriched_line)
 
         # ── Mock short-circuit ───────────────────────────────────────────────
         if is_mock:
@@ -977,13 +1002,17 @@ async def analyze_video(request: AnalyzeRequest):
                           transcript="Most people think it's magic. But it uses YouTube player heatmaps.",
                           title_suggestion="Unlock Video Virality Secrets",
                           caption_suggestion="Stop guessing what works! Here's how to use heatmaps to find viral hotspots in seconds. 🔥",
-                          hashtag_suggestion="#viralclips #videoediting #heatmaps #aitools"),
+                          hashtag_suggestion="#viralclips #videoediting #heatmaps #aitools",
+                          scores={"hook": 9, "flow": 8, "value": 9, "trend": 7, "shareability": 8},
+                          score_reason="Strong curiosity hook; trend fit is the weakest point."),
                 ViralClip(title="Grow on TikTok or Reels",          start_time=22.0, end_time=32.0, hook_time=27.0, virality_score=88,
                           key_quotes=["Changing how editors crop videos.", "If you want to grow on TikTok, try it."],
                           transcript="This is changing how editors crop videos. If you want to grow on TikTok, try it.",
                           title_suggestion="The Ultimate TikTok Growth Hack",
                           caption_suggestion="Want to scale your TikTok views? This tool will revolutionize your workflow. 🚀",
-                          hashtag_suggestion="#tiktokgrowth #reels #shorts #editingtips"),
+                          hashtag_suggestion="#tiktokgrowth #reels #shorts #editingtips",
+                          scores={"hook": 7, "flow": 8, "value": 7, "trend": 9, "shareability": 7},
+                          score_reason="Very on-trend topic; the opening line could hit harder."),
                 ViralClip(title="Introductory overview of the tool", start_time=0.0,  end_time=11.0, hook_time=3.0, virality_score=72,
                           key_quotes=["Hello and welcome.", "Finds viral hotspots."],
                           transcript="Hello and welcome. It finds viral hotspots and highlights them.",
@@ -1191,6 +1220,11 @@ async def analyze_video(request: AnalyzeRequest):
             f"4. Keep titles snappy, viral, engaging, and under 8 words.\n\n"
             f"Transcript (start|end[|interest] text):\n---\n{transcript_text}\n---\n\n"
             f"Rules: use exact seconds from transcript; clips must start/end at sentence boundaries; do not overlap.\n"
+            f"Score every clip 1-10 on five dimensions: score_hook (do the first 3 seconds stop the scroll), "
+            f"score_flow (stands alone with a clear arc), score_value (insight, emotion, humor or usefulness), "
+            f"score_trend (fits what performs on TikTok/Reels/Shorts now), score_shareability (would people quote or send it). "
+            f"Add score_reason: one short sentence in the transcript language naming the strongest and weakest dimension. "
+            f"virality_score (1-100) should reflect these five scores.\n"
             f"Return clips sorted by virality_score desc."
         )
 
@@ -1459,6 +1493,8 @@ async def analyze_video(request: AnalyzeRequest):
                                             "title_suggestion": sanitize_first_person_title(getattr(c, 'title_suggestion', ''), channel, lang=lang_code),
                                             "caption_suggestion": getattr(c, 'caption_suggestion', ''),
                                             "hashtag_suggestion": getattr(c, 'hashtag_suggestion', ''),
+                                            "scores": extract_dimension_scores(c),
+                                            "score_reason": getattr(c, 'score_reason', '') or '',
                                         }
                                         for c in raw_clips
                                     ]
@@ -1685,6 +1721,14 @@ async def analyze_video(request: AnalyzeRequest):
                     start = round(new_start, 2)
                     end = round(new_end, 2)
 
+            # Open on a sentence start and close on a sentence end (never mid-word)
+            start, end = snap_to_sentence_boundaries(
+                start, end, enriched_transcript,
+                window=2.0,
+                min_duration=min_target_duration * 0.9,
+                max_duration=max_target_duration * 1.05,
+            )
+
             if hook is None or not (start <= hook <= end):
                 hook = start
             
@@ -1708,7 +1752,9 @@ async def analyze_video(request: AnalyzeRequest):
                 transcript=" ".join(clip_lines),
                 title_suggestion=sanitize_first_person_title(raw_clip.get('title_suggestion', ''), channel, lang=lang_code),
                 caption_suggestion=caption_sug,
-                hashtag_suggestion=hashtag_sug
+                hashtag_suggestion=hashtag_sug,
+                scores=raw_clip.get('scores') or None,
+                score_reason=raw_clip.get('score_reason') or ""
             ))
 
         # Enforce max constraint of ~200 clips for auto clip count
@@ -1729,7 +1775,8 @@ async def analyze_video(request: AnalyzeRequest):
                 start=float(line["start"]),
                 end=float(line["end"]),
                 text=line["text"],
-                engagement=line.get("engagement")
+                engagement=line.get("engagement"),
+                words=line.get("words")
             )
             for line in enriched_transcript
         ]

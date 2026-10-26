@@ -9,6 +9,8 @@ export interface TranscriptLine {
   end: number;
   text: string;
   engagement?: number;
+  /** Per-word timings from YouTube auto-captions, when available */
+  words?: { word: string; start: number; end: number }[];
 }
 
 export interface ViralClip {
@@ -22,6 +24,9 @@ export interface ViralClip {
   title_suggestion?: string;
   caption_suggestion?: string;
   hashtag_suggestion?: string;
+  /** Per-dimension AI scores (1-10): hook, flow, value, trend, shareability */
+  scores?: Partial<Record<'hook' | 'flow' | 'value' | 'trend' | 'shareability', number>> | null;
+  score_reason?: string;
 }
 
 export interface AnalyzeResponse {
@@ -152,6 +157,20 @@ export interface RenderSettings {
   // Multi-Segment Merged Highlight Video
   renderMode?: 'separate' | 'merged';
   compilationTitle?: string;
+  // Smart editing
+  smartEditing?: SmartEditingSettings;
+}
+
+export interface SmartEditingSettings {
+  dynamicTracking: boolean;   // follow the speaker's face through the clip
+  bgmDucking: boolean;        // lower the music while someone speaks
+  removeSilence: boolean;     // cut silent gaps inside the clip
+  silenceMinDuration: number; // seconds of silence before a gap is cut
+  teaserHook: boolean;        // open with a short teaser of the hook moment
+  teaserDuration: number;     // seconds
+  autoZoom: boolean;          // alternate punch-in zooms per sentence
+  generateThumbnail: boolean; // export a JPG cover per clip
+  captionTiming: 'auto' | 'whisper';
 }
 
 export interface RenderClipStatus {
@@ -161,6 +180,7 @@ export interface RenderClipStatus {
   status: 'pending' | 'downloading' | 'transcribing' | 'tracking' | 'rendering' | 'completed' | 'error';
   progress_percent: number;
   download_url?: string;
+  thumbnail_url?: string;
   error_message?: string;
   error?: string;
 }
